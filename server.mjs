@@ -158,10 +158,29 @@ function parseStamp(stamp) {
   const re = /E(\d+)=\d+\/([A-Z0-9_]+)\/(?:[^/]*)\/(\d+)\/(\d+)\//g;
   let x;
   while ((x = re.exec(stamp))) enemies.push({ idx: Number(x[1]), id: x[2], hp: Number(x[3]), max: Number(x[4]) });
-  return { turn, hp: m ? Number(m[1]) : null, maxHp: m ? Number(m[2]) : null, hpSum: enemies.reduce((s, e) => s + e.hp, 0), enemies };
+  return { turn, hp: m ? Number(m[1]) : null, maxHp: m ? Number(m[2]) : null, energy: energyOf(stamp), hpSum: enemies.reduce((s, e) => s + e.hp, 0), enemies };
 }
 
-// 把一局的 planActions 变成 {回合: [牌]}，并附带牌面伤害（vars=Damage=N）
+// 状态串里的 energy=N（回合开始时的能量）
+function energyOf(stamp) {
+  const m = /(?:^|;)energy=(\d+)/.exec(stamp || '');
+  return m ? Number(m[1]) : null;
+}
+
+// 一局里「每个回合的帧」，按回合号去重排序（rootLiveStamp 是第 1 回合，continuations 是后面各回合）
+function framesOf(hr) {
+  const s = hr && hr.search;
+  if (!s) return [];
+  const frames = [];
+  if (s.rootLiveStamp) frames.push(parseStamp(s.rootLiveStamp));
+  for (const c of s.continuations || []) frames.push(parseStamp(c && c.StateText));
+  const seen = new Set();
+  const list = frames.filter(f => f && !seen.has(f.turn) && seen.add(f.turn));
+  list.sort((a, b) => a.turn - b.turn);
+  return list;
+}
+
+// 把一局的 planActions 变成 {回合: [牌]}，并附带牌面伤害（vars=Damage=N）和费用（energy=False:1）
 function parsePlayActions(actions) {
   const byTurn = new Map();
   for (const a of actions || []) {
@@ -170,10 +189,32 @@ function parsePlayActions(actions) {
     const turn = Number(m[1]);
     const vars = (/vars=([^|]*)/.exec(m[3]) || [])[1] || '';
     const dmg = Number((/Damage=(\d+)/.exec(vars) || [])[1] || 0);
+    const costM = /\|energy=[A-Za-z]+:(\d+)/.exec(m[3]);
+    const cost = costM ? Number(costM[1]) : 0;
     if (!byTurn.has(turn)) byTurn.set(turn, []);
-    byTurn.get(turn).push({ cardId: m[2], face: dmg });
+    byTurn.get(turn).push({ cardId: m[2], face: dmg, cost });
   }
   return byTurn;
+}
+
+/**
+ * 能量浪费（估算）：每回合开始时的 energy 减去这回合出牌花掉的总费用。
+ * 中途靠遗物/牌回的能量看不见，所以只能估；回合开始时就没花完的部分会算进来。
+ */
+function energyWaste(hr) {
+  const frames = framesOf(hr);
+  if (!frames.length) return null;
+  const plays = parsePlayActions((hr.search && hr.search.planActions) || []);
+  let waste = 0;
+  let turns = 0;
+  for (const f of frames) {
+    if (f.energy == null) continue;
+    const spent = (plays.get(f.turn) || []).reduce((s, p) => s + (p.cost || 0), 0);
+    waste += Math.max(0, f.energy - spent);
+    turns++;
+  }
+  if (!turns) return null;
+  return { waste, turns, perTurn: waste / turns };
 }
 
 /**
@@ -209,12 +250,7 @@ function attributeResult(hr) {
   const q = hr.comparisonQuality;
   const enemyRaw = pick(q, 'enemyHp');
   const finalEnemyHp = Number.isFinite(enemyRaw) ? Number(enemyRaw) : null;
-  const frames = [];
-  if (s.rootLiveStamp) frames.push(parseStamp(s.rootLiveStamp));
-  for (const c of s.continuations || []) frames.push(parseStamp(c.StateText));
-  const seen = new Set();
-  const frames2 = frames.filter(f => f && !seen.has(f.turn) && seen.add(f.turn));
-  frames2.sort((a, b) => a.turn - b.turn);
+  const frames2 = framesOf(hr);
   if (!frames2.length) return null;
   const plays = parsePlayActions(s.planActions);
 
@@ -388,6 +424,9 @@ function runOne(job, variant, seed) {
         // 求解器的 quality 里没有「战斗在第几回合结束」，就用出牌记录里最大的回合号顶上
         if (!Number.isFinite(row.turns) && plays.turns) row.turns = plays.turns;
       }
+      // 能量浪费（估算）：回合开始能量 - 这回合出牌费用
+      const ew = hr ? energyWaste(hr) : null;
+      if (ew) { row.energyWaste = Math.round(ew.waste * 10) / 10; row.energyWastePerTurn = Math.round(ew.perTurn * 100) / 100; }
       // 药水用量只有 quality 里给（打了 / 用了几个）
       const qualityObj = (hr && hr.comparisonQuality) || (r && r.comparisonQuality);
       const potVal = pick(qualityObj, 'ProjectedBattlePotionCount');
@@ -426,6 +465,36 @@ function summarizeVariant(v) {
   const playList = Object.entries(playByCard)
     .map(([cardId, total]) => ({ cardId, total, avg: runsWithPlays ? total / runsWithPlays : 0 }))
     .sort((a, b) => b.total - a.total);
+  // 每次打出值多少伤害（伤害归因 ÷ 打出次数）——判断一张牌是不是「空转」
+  const dmgOf = Object.create(null);
+  for (const a of attr) dmgOf[a.cardId] = a.damage;
+  for (const p of playList) {
+    const d = dmgOf[p.cardId];
+    p.damage = d == null ? null : Math.round(d * 10) / 10;
+    p.perPlay = (d != null && p.total) ? Math.round(d / p.total * 10) / 10 : null;
+  }
+  const attrTotal = Object.values(dmgOf).reduce((s, d) => s + d, 0);
+  // ---- 能量浪费（估算，只看有记录的局）----
+  const eRows = rows.filter(r => Number.isFinite(r.energyWaste));
+  const energyWaste = eRows.length ? Math.round(eRows.reduce((s, r) => s + r.energyWaste, 0) / eRows.length * 10) / 10 : null;
+  const energyWastePerTurn = eRows.length
+    ? Math.round(eRows.reduce((s, r) => s + (r.energyWastePerTurn || 0), 0) / eRows.length * 100) / 100 : null;
+  // ---- 结束回合分布：几回合打完的有几局 ----
+  const hist = Object.create(null);
+  for (const r of rows) {
+    if (!Number.isFinite(r.turns)) continue;
+    hist[r.turns] = (hist[r.turns] || 0) + 1;
+  }
+  const turnsHist = Object.keys(hist).map(Number).sort((a, b) => a - b)
+    .map(turns => ({ turns, runs: hist[turns] }));
+  // ---- 胜率的 95% 置信区间（Wilson）----
+  const nRuns = rows.length;
+  const p = nRuns ? wins / nRuns : 0;
+  const z = 1.96;
+  const denom = 1 + z * z / Math.max(1, nRuns);
+  const center = nRuns ? (p + z * z / (2 * nRuns)) / denom : 0;
+  const half = nRuns ? (z * Math.sqrt(p * (1 - p) / nRuns + z * z / (4 * nRuns * nRuns)) / denom) : 0;
+  const winrateCI = { lo: Math.max(0, center - half), hi: Math.min(1, center + half), half };
   // ---- 每回合伤害：把每局「第 N 回合造成多少伤害」按回合号加起来再除以局数 ----
   const turnDmg = Object.create(null);
   let runsWithTurns = 0;
@@ -468,6 +537,12 @@ function summarizeVariant(v) {
     avgPotionsUsed: avgPotionsUsed == null ? null : Math.round(avgPotionsUsed * 10) / 10,
     avgDeficit: avgDeficit == null ? null : Math.round(avgDeficit * 10) / 10,
     medianHpLost: medianHpLost == null ? null : Math.round(medianHpLost * 10) / 10,
+    // —— 2026-11-27 12:1x 又加的：能量浪费、回合分布、胜率置信区间、每张牌每次打出的伤害 ——
+    energyWaste,
+    energyWastePerTurn,
+    turnsHist,
+    winrateCI,
+    attrTotal: Math.round(attrTotal * 10) / 10,
   };
   return v.summary;
 }

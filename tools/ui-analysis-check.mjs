@@ -100,6 +100,10 @@ try {
   const s = run.summary || {};
   ok(s.playsPerRun > 0 && s.plays && s.plays.length > 0, 'summary 里带上了打出次数', `每局 ${s.playsPerRun} 张 · ${s.plays.length} 种牌`);
   ok(s.damageByTurn && s.damageByTurn.length >= 2, 'summary 里带上了每回合伤害', s.damageByTurn ? `T1..T${s.damageByTurn.length}` : '无');
+  ok(s.winrateCI && s.winrateCI.half > 0, 'summary 里带上了胜率置信区间', s.winrateCI ? `±${(s.winrateCI.half * 100).toFixed(1)}%` : '无');
+  ok(s.turnsHist && s.turnsHist.length >= 1, 'summary 里带上了结束回合分布', s.turnsHist ? s.turnsHist.map(x => x.turns + '回合×' + x.runs).join(' ') : '无');
+  ok(s.energyWastePerTurn != null, 'summary 里带上了能量浪费（估算）', `每回合剩 ${s.energyWastePerTurn}`);
+  ok((s.plays || []).some(p => p.perPlay != null && p.perPlay > 0), '每张牌算了「每次打出多少伤害」', (s.plays || []).slice(0, 3).map(p => p.cardId + ':' + p.perPlay).join(' '));
   // 单局记录加起来应该等于 summary 的总数（检查统计口径没漏）
   const sumRows = (run.rows || []).reduce((a, r) => a + (r.playsTotal || 0), 0);
   ok(sumRows === s.playsTotal, '单局记录之和 = summary 总数', `${sumRows} vs ${s.playsTotal}`);
@@ -117,11 +121,18 @@ try {
       hasPerRun: /每局打出/.test(stats),
       hasMedian: /中位数/.test(stats),
       playsTitle: (document.querySelector('#singlePlays .attr-title') || {}).textContent || '',
+      histRows: document.querySelectorAll('#singleTurnHist .bar-row').length,
+      hasCI: /胜率 ±/.test(stats),
+      hasEnergy: /剩能量/.test(stats),
+      perPlayText: first ? /每次 [\\d.]+ 伤害/.test(first.textContent) : false,
     };
   })()`);
   ok(ui.plays > 0 && /次 · 每局/.test(ui.firstText), '打出次数块列出来了', `${ui.plays} 行 · 首行「${ui.firstText}」`);
   ok(ui.turns >= 2, '每回合伤害块列出来了', `${ui.turns} 回合`);
   ok(ui.hasPerRun && ui.hasMedian, '顶部统计多了「每局打出」「中位数」');
+  ok(ui.histRows >= 1, '结束回合分布块列出来了', ui.histRows + ' 行');
+  ok(ui.hasCI && ui.hasEnergy, '顶部统计多了「胜率区间」「剩能量」');
+  ok(ui.perPlayText, '打出次数那行带上了「每次 X 伤害」');
 
   // CSV 里也要有
   const csv = await evaluate(`(() => {

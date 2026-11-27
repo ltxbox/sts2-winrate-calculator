@@ -141,8 +141,14 @@ try {
   })()`);
   ok(cmpJob.status === 'done' && cmpJob.variants === 11, '10 张候选真的跑完（基线 + 10）', `status=${cmpJob.status} variants=${cmpJob.variants} total=${cmpJob.total}`);
   await sleep(600);
-  const rendered = await evaluate(`(() => ({ cards: document.querySelectorAll('#cmpResult .cmp-card').length, texts: [...document.querySelectorAll('#cmpResult .cmp-card .who')].slice(0, 3).map(e => e.textContent) }))()`);
+  const rendered = await evaluate(`(() => {
+    const cards = [...document.querySelectorAll('#cmpResult .cmp-card')];
+    const deltas = cards.slice(1).map(c => (c.querySelector('.delta') || {}).textContent || '');
+    return { cards: cards.length, baselineDelta: (cards[0] && cards[0].querySelector('.delta') || {}).textContent || '', delta: deltas[0] || '', texts: cards.slice(0, 3).map(c => (c.querySelector('.who') || {}).textContent) };
+  })()`);
   ok(rendered.cards === 11, '结果区画出 11 张卡', `${rendered.cards} 张`);
+  ok(/基线（不放牌）/.test(rendered.baselineDelta), '基线卡写的是「基线（不放牌）」', rendered.baselineDelta);
+  ok(/比不放/.test(rendered.delta), '每张卡都写了「比不放 ±x.xpp」', rendered.delta);
 
   // ---------- 4) 药水加到 10 瓶，第 11 瓶被拦 ----------
   const potions = await evaluate(`(() => {

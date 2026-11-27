@@ -1263,7 +1263,7 @@ function playsBlock(summary) {
   const top = list.slice(0, 12);
   const rows = top.map(p => ({
     label: cardName(p.cardId), value: p.total,
-    text: `${p.total} 次 · 每局 ${p.avg.toFixed(1)}`,
+    text: `${p.total} 次 · 每局 ${p.avg.toFixed(1)}${p.perPlay != null ? ` · 每次 ${p.perPlay} 伤害` : ''}`,
   }));
   const rest = list.slice(12);
   if (rest.length) {
@@ -1284,6 +1284,18 @@ function turnsBlock(summary) {
   return barBlock(head, rows);
 }
 
+/** 结束回合分布：几回合打完的有几局（平均值看不出「一半碾压一半拖死」） */
+function turnHistBlock(summary) {
+  const list = summary && summary.turnsHist;
+  if (!list || !list.length) return '';
+  const total = list.reduce((s, x) => s + x.runs, 0);
+  const rows = list.map(x => ({
+    label: `${x.turns} 回合`, value: x.runs,
+    text: `${x.runs} 局${total ? ` · ${(x.runs / total * 100).toFixed(0)}%` : ''}`,
+  }));
+  return barBlock('结束回合分布（几回合打完的有几局）', rows);
+}
+
 function renderResults(job) {
   if (!job) {
     $('#winrate').textContent = '—';
@@ -1291,6 +1303,7 @@ function renderResults(job) {
     $('#singleAttr').innerHTML = '';
     $('#singlePlays').innerHTML = '';
     $('#singleTurns').innerHTML = '';
+    $('#singleTurnHist').innerHTML = '';
     $('#resultList').innerHTML = '<div class="empty">选好卡组和遭遇，点右上「开始测算」</div>';
     return;
   }
@@ -1302,6 +1315,9 @@ function renderResults(job) {
   const avg = valid.length ? valid.reduce((s, r) => s + r.hpLost, 0) / valid.length : null;
   if (done) $('#winrate').textContent = (wins / done * 100).toFixed(1) + '%';
   else $('#winrate').textContent = '…';
+  // 胜率的 95% 置信区间：样本少的时候 ± 很大，别把 3 个点的差别当结论
+  const ci = v.summary && v.summary.winrateCI;
+  const ciTxt = (ci && done) ? `±${(ci.half * 100).toFixed(1)}%` : '';
   const enc = state.encById.get(job.encounter);
   const c = state.character && state.meta.characters.find(x => x.id === job.character);
   const deckSize = (v.deck || []).reduce((s, d) => s + (d.count || 1), 0);
@@ -1331,6 +1347,8 @@ function renderResults(job) {
     (v.summary && v.summary.medianHpLost != null) ? `<span title="一半样本的掉血不超过这个数，比平均值抗极端值">中位数 <b>${v.summary.medianHpLost}</b></span>` : '',
     (v.summary && v.summary.playsPerRun != null) ? `<span title="每局平均打出多少张牌">每局打出 <b>${v.summary.playsPerRun}</b> 张</span>` : '',
     (v.summary && v.summary.avgPotionsUsed) ? `<span title="每局平均用掉的药水数">用药 <b>${v.summary.avgPotionsUsed}</b> 瓶</span>` : '',
+    ciTxt ? `<span title="95% 置信区间（Wilson）：${(ci.lo * 100).toFixed(1)}% – ${(ci.hi * 100).toFixed(1)}%，样本越多区间越窄">胜率 <b>${ciTxt}</b></span>` : '',
+    (v.summary && v.summary.energyWastePerTurn != null) ? `<span title="估算：回合开始的能量减去这回合出牌花掉的费用。靠遗物/牌中途回的能量看不见">剩能量 <b>${v.summary.energyWastePerTurn}</b>/回合</span>` : '',
     (avgDef > 0) ? `<span title="失败局平均还差多少血没打死">没打死时差 <b>${avgDef}</b> 血</span>` : '',
     job.elapsedSec ? `<span>耗时 <b>${job.elapsedSec}s</b></span>` : '',
   ].join('');
@@ -1339,6 +1357,7 @@ function renderResults(job) {
     ? attrBlock(v.summary.attribution, '伤害归因（全部样本合计）') : '';
   $('#singlePlays').innerHTML = playsBlock(v.summary);
   $('#singleTurns').innerHTML = turnsBlock(v.summary);
+  $('#singleTurnHist').innerHTML = turnHistBlock(v.summary);
   const rows = results.slice().reverse().map(r => {
     const cls = r.won === true ? 'win' : (r.won === false ? 'loss' : '');
     // 掉血最少的 / 最多的那一局打个标，方便对回是哪个种子
@@ -1680,7 +1699,8 @@ function renderCompare(job, opts) {
     const isBase = i === 0;
     const dpp = s.deltaWinratePp;
     const dcls = dpp == null || Math.abs(dpp) < 0.05 ? 'same' : (dpp > 0 ? 'up' : 'down');
-    const dtxt = isBase ? '基线' : (dpp == null ? '—' : (dpp > 0 ? '+' : '') + dpp.toFixed(1) + 'pp');
+    // 和「不放这张」比 —— 对比模式本来就是跟跳过比，直接把人话写出来
+    const dtxt = isBase ? '基线（不放牌）' : (dpp == null ? '比不放 —' : `比不放 ${dpp > 0 ? '+' : ''}${dpp.toFixed(1)}pp`);
     const rel = s.relWinrate == null ? '' : (isBase ? '' : `（相对 ${s.relWinrate > 0 ? '+' : ''}${(s.relWinrate * 100).toFixed(0)}%）`);
     const label = isBase ? (o.baseLabel || '基线（不加牌）') : (o.prefix || '') + cardName(v.card && v.card.cardId) + (o.prefix ? '' : (v.card && v.card.upgradeLevels ? '+' : ''));
     const card = !isBase && v.card ? state.cardsById.get(v.card.cardId) : null;
@@ -1688,7 +1708,7 @@ function renderCompare(job, opts) {
       <div class="top">
         ${card ? `<span class="thumb">${imgTag(card)}</span>` : ''}
         <span class="who" title="${esc(label)}">${esc(label)}</span>
-        <span class="wr">${((s.winrate || 0) * 100).toFixed(1)}%</span>
+        <span class="wr">${((s.winrate || 0) * 100).toFixed(1)}%${s.winrateCI ? `<span class="wr-ci muted tiny">±${(s.winrateCI.half * 100).toFixed(1)}%</span>` : ''}</span>
       </div>
       <div class="kv">
         <span class="delta ${dcls}">${dtxt}<span class="muted tiny">${rel}</span></span>
@@ -1927,7 +1947,7 @@ function renderRest(job) {
     return `<div class="cmp-card">
       <div class="top">
         <span class="who">${esc(v.label)}</span>
-        <span class="wr">${((s.winrate || 0) * 100).toFixed(1)}%</span>
+        <span class="wr">${((s.winrate || 0) * 100).toFixed(1)}%${s.winrateCI ? `<span class="wr-ci muted tiny">±${(s.winrateCI.half * 100).toFixed(1)}%</span>` : ''}</span>
       </div>
       <div class="kv">
         <span class="delta ${dcls}">${dpp == null ? '' : (dpp > 0 ? '+' : '') + dpp.toFixed(1) + 'pp'}</span>

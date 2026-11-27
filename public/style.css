@@ -179,6 +179,15 @@ dialog::backdrop { background: #000a; }
 .lg i { width:10px; height:10px; border-radius:2px; flex:none; }
 .lg-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px; }
 .attr-block { margin:8px 0; }
+/* 分析区的条状列表（打出次数 / 每回合伤害） */
+.bar-card { border:1px solid #232936; border-radius:10px; background:#151922; padding:8px 10px; }
+.bar-list { display:flex; flex-direction:column; gap:3px; max-height:260px; overflow-y:auto; }
+.bar-row { display:grid; grid-template-columns:minmax(70px,150px) 1fr auto; gap:8px; align-items:center; font-size:12px; color:#c9d1de; }
+.bar-row .bar-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bar-row .bar { height:8px; border-radius:4px; background:#202836; overflow:hidden; }
+.bar-row .bar i { display:block; height:100%; border-radius:4px; background:linear-gradient(90deg,#3f7fd6,#67d38a); }
+.bar-row .bar-num { color:#dfe5ee; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.bar-row.is-other .bar-name { color:#8b95a7; }
 
 /* ===== 角色自带遗物 ===== */
 .chip.auto { border-color:#3a4a63; background:#1a2231; }

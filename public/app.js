@@ -1213,7 +1213,8 @@ async function poll() {
       $('#bar').style.width = '100%';
       $('#progressText').textContent = job.status === 'failed' ? '失败' : `完成 ${job.done}/${job.total}`;
       $('#progLabel').textContent = job.status === 'failed' ? '失败' : '已完成';
-      if (job.summary) $('#csv').disabled = false;
+      // 汇总在 variants[0].summary 里（publicJob 没有顶层 summary）——之前只认 job.summary，导致「导出 CSV」一直灰着
+      if (job.summary || (job.variants && job.variants[0] && job.variants[0].summary)) $('#csv').disabled = false;
       if (job.status === 'failed') $('#progressText').textContent = '失败：' + (job.lastError || '');
       autoExpandMid();
       return;
@@ -1239,11 +1240,57 @@ function hpRangeText(s, withAvg = true) {
   return `<b>${lo === hi ? lo : lo + '–' + hi}</b>${avgTxt}`;
 }
 
+/** 分析区的条状列表：打出次数 / 每回合伤害都用它 */
+function barBlock(title, rows, opts) {
+  const o = opts || {};
+  const max = rows.reduce((m, r) => Math.max(m, r.value), 0) || 1;
+  if (!rows.length) return '';
+  return `<div class="bar-card">
+    <div class="attr-title">${esc(title)}</div>
+    <div class="bar-list">${rows.map(r => `<div class="bar-row">
+      <span class="bar-name" title="${esc(r.label)}">${esc(r.label)}</span>
+      <span class="bar"><i style="width:${Math.max(2, r.value / max * 100).toFixed(1)}%"></i></span>
+      <span class="bar-num">${esc(r.text)}</span>
+    </div>`).join('')}</div>
+  </div>`;
+}
+
+/** 打出次数（全部样本合计）：每张牌一共几次、平均每局几次 */
+function playsBlock(summary) {
+  const list = summary && summary.plays;
+  if (!list || !list.length) return '';
+  const perRun = summary.playsPerRun != null ? summary.playsPerRun : null;
+  const top = list.slice(0, 12);
+  const rows = top.map(p => ({
+    label: cardName(p.cardId), value: p.total,
+    text: `${p.total} 次 · 每局 ${p.avg.toFixed(1)}`,
+  }));
+  const rest = list.slice(12);
+  if (rest.length) {
+    const total = rest.reduce((s, p) => s + p.total, 0);
+    const avg = perRun ? total / (summary.runs || 1) : null;
+    rows.push({ label: `其他 ${rest.length} 种`, value: total, text: `${total} 次${avg == null ? '' : ' · 每局 ' + avg.toFixed(1)}` });
+  }
+  const head = `打出次数（全部样本合计）${perRun != null ? ` · 平均每局 ${perRun} 张` : ''}${summary.playsPerTurn != null ? ` · 每回合 ${summary.playsPerTurn} 张` : ''}`;
+  return barBlock(head, rows);
+}
+
+/** 每回合伤害（各样本按回合号平均） */
+function turnsBlock(summary) {
+  const list = summary && summary.damageByTurn;
+  if (!list || list.length < 2) return '';
+  const rows = list.map(t => ({ label: `第 ${t.turn} 回合`, value: t.damage, text: String(t.damage) }));
+  const head = `每回合伤害（平均）${summary.dmgPerTurn != null ? ` · 平均每回合 ${summary.dmgPerTurn}` : ''}`;
+  return barBlock(head, rows);
+}
+
 function renderResults(job) {
   if (!job) {
     $('#winrate').textContent = '—';
     $('#resultStats').innerHTML = '';
     $('#singleAttr').innerHTML = '';
+    $('#singlePlays').innerHTML = '';
+    $('#singleTurns').innerHTML = '';
     $('#resultList').innerHTML = '<div class="empty">选好卡组和遭遇，点右上「开始测算」</div>';
     return;
   }
@@ -1267,6 +1314,11 @@ function renderResults(job) {
   const rangeTxt = minL == null ? '—' : (minL === maxL ? String(minL) : `${minL}–${maxL}`);
   const rangeTitle = minL == null ? '' :
     `最少 ${minL}${minRec ? '（' + minRec.seed + '）' : ''} · 最多 ${maxL}${maxRec ? '（' + maxRec.seed + '）' : ''} · ${valid.length} 局里统计`;
+  // 失败局平均「还差多少血没打死」（只在有失败局时显示）
+  const lossRuns = valid.filter(r => r.won === false);
+  const avgDef = lossRuns.length
+    ? Math.round(lossRuns.reduce((s, r) => s + (Number.isFinite(r.deficit) ? r.deficit : 0), 0) / lossRuns.length * 10) / 10
+    : 0;
   $('#resultStats').innerHTML = [
     `<span>配置 <b>${esc(c ? c.name : job.character)}</b> · ${job.ascension}飞升 · ${v.hp}/${v.maxHp}HP</b></span>`,
     job.gameMode === 'Dread'
@@ -1276,11 +1328,17 @@ function renderResults(job) {
     `<span>卡组 <b>${deckSize}</b> 张 · 遗物 <b>${(job.relics || []).length}</b></span>`,
     `<span>已跑 <b>${done}/${job.total}</b> · 胜 <b>${wins}</b></span>`,
     `<span title="${esc(rangeTitle)}">预估掉血 <b>${rangeTxt}</b>${avg == null ? '' : ` <span class="muted tiny">平均 ${avg.toFixed(1)}</span>`}</span>`,
+    (v.summary && v.summary.medianHpLost != null) ? `<span title="一半样本的掉血不超过这个数，比平均值抗极端值">中位数 <b>${v.summary.medianHpLost}</b></span>` : '',
+    (v.summary && v.summary.playsPerRun != null) ? `<span title="每局平均打出多少张牌">每局打出 <b>${v.summary.playsPerRun}</b> 张</span>` : '',
+    (v.summary && v.summary.avgPotionsUsed) ? `<span title="每局平均用掉的药水数">用药 <b>${v.summary.avgPotionsUsed}</b> 瓶</span>` : '',
+    (avgDef > 0) ? `<span title="失败局平均还差多少血没打死">没打死时差 <b>${avgDef}</b> 血</span>` : '',
     job.elapsedSec ? `<span>耗时 <b>${job.elapsedSec}s</b></span>` : '',
   ].join('');
   if (job.lastError) $('#resultStats').insertAdjacentHTML('beforeend', `<span style="color:#c0392b">错误：${esc(job.lastError)}</span>`);
   $('#singleAttr').innerHTML = (v.summary && v.summary.attribution && v.summary.attribution.length)
     ? attrBlock(v.summary.attribution, '伤害归因（全部样本合计）') : '';
+  $('#singlePlays').innerHTML = playsBlock(v.summary);
+  $('#singleTurns').innerHTML = turnsBlock(v.summary);
   const rows = results.slice().reverse().map(r => {
     const cls = r.won === true ? 'win' : (r.won === false ? 'loss' : '');
     // 掉血最少的 / 最多的那一局打个标，方便对回是哪个种子
@@ -1301,6 +1359,12 @@ function exportCsv() {
   for (const r of v.results) lines.push([r.seed, r.won, r.hpLost, r.deficit, r.turns, r.status, r.sec].map(v2 => v2 == null ? '' : v2).join(','));
   const { lo, hi, avg } = hpRangeOf(v.summary || {});
   if (lo != null && hi != null) lines.push(['# 预估掉血区间', lo, hi, '平均', avg == null ? '' : avg.toFixed(2)].join(','));
+  // 打出次数也一并导出，方便自己在 Excel 里排序看
+  const plays = (v.summary && v.summary.plays) || [];
+  if (plays.length) {
+    lines.push('# 打出次数（全部样本合计）', ['cardId', '卡名', '次数', '每局平均'].join(','));
+    for (const p of plays) lines.push([p.cardId, cardName(p.cardId), p.total, p.avg.toFixed(2)].join(','));
+  }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

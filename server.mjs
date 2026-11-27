@@ -177,6 +177,29 @@ function parsePlayActions(actions) {
 }
 
 /**
+ * 打出次数：planActions 里每张牌打了几次（"3:PlayCard:STRIKE_REGENT:..."）。
+ * 只数 PlayCard；EndTurn 之类不算。回来的是 { byCard, total, turns }。
+ */
+function playCounts(hr) {
+  const acts = (hr && hr.search && hr.search.planActions) || [];
+  const byCard = Object.create(null);
+  let total = 0;
+  let maxTurn = 0;
+  for (const a of acts) {
+    const m = /^(\d+):PlayCard:([A-Z0-9_]+)/.exec(a);
+    if (m) {
+      byCard[m[2]] = (byCard[m[2]] || 0) + 1;
+      total += 1;
+      maxTurn = Math.max(maxTurn, Number(m[1]));
+      continue;
+    }
+    const t = /^(\d+):/.exec(a);   // EndTurn 之类也带回合号，用来数「打到第几回合」
+    if (t) maxTurn = Math.max(maxTurn, Number(t[1]));
+  }
+  return { byCard, total, turns: maxTurn || null };
+}
+
+/**
  * 伤害归因：按「每回合敌人实际掉的血」分摊到该回合打出的伤害牌，权重用牌面伤害。
  * 这一回合没有任何带伤害的牌却掉了血（召唤物 / 中毒 / 能力等），记到 __other__。
  */
@@ -356,7 +379,19 @@ function runOne(job, variant, seed) {
       }
       // 伤害归因只在 harness-result.json 里（有 planActions）
       const attr = hr ? attributeResult(hr) : null;
-      if (attr) row.attr = attr.byCard;
+      if (attr) { row.attr = attr.byCard; row.perTurn = attr.perTurn; }
+      // 打出次数（每张牌打了几次），同样从 planActions 数出来
+      const plays = hr ? playCounts(hr) : null;
+      if (plays) {
+        row.plays = plays.byCard;
+        row.playsTotal = plays.total;
+        // 求解器的 quality 里没有「战斗在第几回合结束」，就用出牌记录里最大的回合号顶上
+        if (!Number.isFinite(row.turns) && plays.turns) row.turns = plays.turns;
+      }
+      // 药水用量只有 quality 里给（打了 / 用了几个）
+      const qualityObj = (hr && hr.comparisonQuality) || (r && r.comparisonQuality);
+      const potVal = pick(qualityObj, 'ProjectedBattlePotionCount');
+      if (Number.isFinite(potVal)) row.potionsUsed = potVal;
       // 明细删掉，省磁盘（KEEP_RUNS=1 时保留，便于排查）
       if (!process.env.KEEP_RUNS) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { } }
       resolve(row);
@@ -378,6 +413,40 @@ function summarizeVariant(v) {
   const attr = Object.entries(byCard)
     .map(([cardId, damage]) => ({ cardId, damage: Math.round(damage * 10) / 10, share: totalDmg ? damage / totalDmg : 0 }))
     .sort((a, b) => b.damage - a.damage);
+  // ---- 打出次数：每张牌在全部样本里一共打了几次、平均每局几次 ----
+  const playByCard = Object.create(null);
+  let playsTotal = 0;
+  let runsWithPlays = 0;
+  for (const r of rows) {
+    if (!r.plays) continue;
+    runsWithPlays++;
+    for (const [k, n] of Object.entries(r.plays)) playByCard[k] = (playByCard[k] || 0) + n;
+    playsTotal += r.playsTotal || 0;
+  }
+  const playList = Object.entries(playByCard)
+    .map(([cardId, total]) => ({ cardId, total, avg: runsWithPlays ? total / runsWithPlays : 0 }))
+    .sort((a, b) => b.total - a.total);
+  // ---- 每回合伤害：把每局「第 N 回合造成多少伤害」按回合号加起来再除以局数 ----
+  const turnDmg = Object.create(null);
+  let runsWithTurns = 0;
+  for (const r of rows) {
+    if (!r.perTurn || !r.perTurn.length) continue;
+    runsWithTurns++;
+    for (const t of r.perTurn) turnDmg[t.turn] = (turnDmg[t.turn] || 0) + (t.damage || 0);
+  }
+  const damageByTurn = Object.keys(turnDmg).map(Number).sort((a, b) => a - b)
+    .map(turn => ({ turn, damage: Math.round((turnDmg[turn] / Math.max(1, runsWithTurns)) * 10) / 10 }));
+  // ---- 药水用量、失败时差多少血 ----
+  const potionRuns = rows.filter(r => Number.isFinite(r.potionsUsed));
+  const avgPotionsUsed = potionRuns.length ? potionRuns.reduce((s, r) => s + r.potionsUsed, 0) / potionRuns.length : null;
+  const lossRows = valid.filter(r => r.won === false);
+  const avgDeficit = lossRows.length ? lossRows.reduce((s, r) => s + (Number.isFinite(r.deficit) ? r.deficit : 0), 0) / lossRows.length : null;
+  // 战损中位数（比平均抗极端值）
+  const lossValues = valid.map(r => r.hpLost).sort((a, b) => a - b);
+  const medianHpLost = lossValues.length
+    ? (lossValues.length % 2 ? lossValues[(lossValues.length - 1) / 2]
+      : (lossValues[lossValues.length / 2 - 1] + lossValues[lossValues.length / 2]) / 2)
+    : null;
   const avgTurns = rows.filter(r => r.turns).length
     ? rows.filter(r => r.turns).reduce((s, r) => s + r.turns, 0) / rows.filter(r => r.turns).length : null;
   v.summary = {
@@ -389,6 +458,16 @@ function summarizeVariant(v) {
     avgTurns: avgTurns == null ? null : Math.round(avgTurns * 10) / 10,
     damageTotal: Math.round(totalDmg),
     attribution: attr,
+    // —— 2026-11-27 新加的几项「分析」 ——
+    plays: playList,
+    playsTotal: playsTotal,
+    playsPerRun: runsWithPlays ? Math.round((playsTotal / runsWithPlays) * 10) / 10 : null,
+    playsPerTurn: (runsWithPlays && avgTurns) ? Math.round((playsTotal / runsWithPlays / avgTurns) * 10) / 10 : null,
+    damageByTurn,
+    dmgPerTurn: (avgTurns && totalDmg) ? Math.round((totalDmg / rows.length / avgTurns) * 10) / 10 : null,
+    avgPotionsUsed: avgPotionsUsed == null ? null : Math.round(avgPotionsUsed * 10) / 10,
+    avgDeficit: avgDeficit == null ? null : Math.round(avgDeficit * 10) / 10,
+    medianHpLost: medianHpLost == null ? null : Math.round(medianHpLost * 10) / 10,
   };
   return v.summary;
 }

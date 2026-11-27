@@ -38,7 +38,7 @@ const state = {
   hp: 37, maxHp: 66, ascension: 10, actIndex: 0,
   gameMode: 'Standard', dreadBoss: '', dreadList: [], serverCaps: null,
   count: 100, prefix: 'HISRUN', potionPolicy: 'Disabled',
-  jobId: null, timer: null, job: null, running: false, encKind: 'boss', encMap: '全部',
+  jobId: null, timer: null, job: null, running: false, encKind: 'boss', encMap: '全部', encGroups: [],
   mode: 'single', cmpCards: [], lastJob: null,
   startingRelics: {},
   // 遗物计数器（从存档读来的实际数字）：{ RELIC_ID: { ints:[{name,value}], bools:[...] } }
@@ -203,13 +203,14 @@ function bindDeckSplit() {
 }
 
 function qStore(q) {
-  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null }));
+  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, group: it.group || null, groupLabel: it.groupLabel || null, rows: it.rows ? it.rows.slice(0, 60) : null, report: it.report || null }));
 }
 function qRestore(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(it => it && it.enc).map(it => ({
     enc: it.enc, done: !!it.done, running: false,
     winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, status: '',
+    group: it.group || null, groupLabel: it.groupLabel || null, rows: it.rows || null, report: it.report || null,
   }));
 }
 function saveLocal() {
@@ -219,7 +220,7 @@ function saveLocal() {
       localStorage.setItem(STORE_KEY, JSON.stringify({
         v: 1,
         deck: state.deck, relics: state.relics, potions: state.potions, relicProps: state.relicProps,
-        character: state.character, encounter: state.encounter, encKind: state.encKind, encMap: state.encMap || '全部',
+        character: state.character, encounter: state.encounter, encKind: state.encKind, encMap: state.encMap || '全部', encGroups: state.encGroups || [], encGroups: state.encGroups || [],
         hp: state.hp, maxHp: state.maxHp, ascension: state.ascension, actIndex: state.actIndex,
         gameMode: state.gameMode, dreadBoss: state.dreadBoss,
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
@@ -256,6 +257,7 @@ function loadLocal() {
   if (s.encounter) state.encounter = s.encounter;
   if (s.encKind) state.encKind = s.encKind;
   if (s.encMap) state.encMap = s.encMap;
+  if (Array.isArray(s.encGroups)) state.encGroups = s.encGroups.filter(k => GROUP_KINDS[k]);
   if (Number.isFinite(s.hp)) state.hp = s.hp;
   if (Number.isFinite(s.maxHp)) state.maxHp = s.maxHp;
   if (Number.isFinite(s.ascension)) state.ascension = s.ascension;
@@ -1150,6 +1152,9 @@ const ENC_IDS = {
 /* 先选地图（四张图 + 全部 + 事件），再选怪的种类 */
 const ENC_MAPS = ['全部', '密林', '暗巷', '巢穴', '荣耀', '事件'];
 const ENC_KINDS = [['weak', '弱怪'], ['normal', '普通'], ['elite', '精英'], ['boss', 'Boss'], ['event', '事件']];
+/* 名单压缩：一次把整类怪都排进去，跑完出「单卡战损预估」数据图 */
+const GROUP_KINDS = { weak: '全部弱怪', normal: '全部普通怪', elite: '全部精英', boss: '全部Boss' };
+const GROUP_PREFIX = '__GROUP_';
 const ENC_MOUNTED = {};   // mode -> root element
 
 function mountEncPanel(rootSel, mode) {
@@ -1214,16 +1219,34 @@ function renderEncLists() {
     const id = ENC_IDS[mode];
     const box = $('#' + id.list);
     if (!box) continue;
-    box.innerHTML = list.map(e => `
+    const map = state.encMap || '全部';
+    // 名单压缩：地图不是「全部/事件」时，把这一类的全部怪合成一行
+    const groupRow = (!q && map !== '全部' && map !== '事件') ? Object.entries(GROUP_KINDS).map(([k, label]) => {
+      const n = state.meta.encounters.filter(e => e.kind === k && (e.map || '事件') === map).length;
+      if (!n) return '';
+      return `<div class="enc-item group ${(state.encGroups || []).includes(k) ? 'active' : ''}" data-group="${k}" title="把${map}的 ${n} 只${label.replace('全部', '')}一次排进队，每只按上面的样本数跑，跑完出一张战损数据图">
+        <span>▣ ${esc(label)}</span><span class="gcount">${n} 只</span>
+      </div>`;
+    }).join('') : '';
+    box.innerHTML = groupRow + (list.map(e => `
       <div class="enc-item ${state.encounter === e.id ? 'active' : ''}" data-id="${esc(e.id)}">
         <span>${esc(e.name)}</span><a class="enc-ext" href="${encUrl(e.id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">资料 ↗</a>
         <span class="id">${esc(e.id)}</span>
-      </div>`).join('') || '<div class="empty">没有匹配的遭遇</div>';
+      </div>`).join('') || (groupRow ? '' : '<div class="empty">没有匹配的遭遇</div>'));
     box.onclick = ev => {
       if (ev.target.closest('.enc-ext')) return;   // 点「资料 ↗」是开外链，不改当前遭遇
       const it = ev.target.closest('.enc-item');
       if (!it) return;
-      state.encounter = it.dataset.id;
+      if (it.dataset.group) {
+        // 「全部弱怪」这类可以多选：选几组就一起跑
+        const k = it.dataset.group;
+        const arr = state.encGroups || (state.encGroups = []);
+        const at = arr.indexOf(k);
+        if (at >= 0) arr.splice(at, 1); else arr.push(k);
+        saveLocal();
+      } else {
+        state.encounter = it.dataset.id;
+      }
       renderEncLists();
       renderQueueAll();
     };
@@ -1238,6 +1261,12 @@ function renderEncLists() {
 /* ---------- run + results ---------- */
 async function run() {
   if (!state.deck.length) { alert('卡组不能为空'); return; }
+  // 选了「全部弱怪 / 全部普通怪…」：一次把这几组怪全跑一遍，跑完出数据图
+  if ((state.encGroups || []).length) {
+    addToQueue('single');
+    runQueue('single');
+    return;
+  }
   if (!state.encounter) { alert('先选一个遭遇'); return; }
   autoCollapseMid();
   state.running = true;
@@ -2127,8 +2156,20 @@ function qArr(mode) {
   return state.queue;
 }
 function qName(id) {
+  if (String(id || '').startsWith(GROUP_PREFIX)) return qGroupLabel(id);
   const e = state.encById.get(id);
   return e ? e.name : id;
+}
+/* 「全部弱怪」这类是名单压缩：一组怪一起排队，跑完出一张数据图 */
+function groupIds(kind) {
+  const map = state.encMap || '全部';
+  return state.meta.encounters
+    .filter(e => e.kind === kind && (map === '全部' || (e.map || '事件') === map))
+    .map(e => e.id);
+}
+function qGroupLabel(id) {
+  const kind = String(id || '').slice(GROUP_PREFIX.length);
+  return `${state.encMap || '全部'} · ${GROUP_KINDS[kind] || '全部'}`;
 }
 function renderQueue(mode) {
   const id = ENC_IDS[mode];
@@ -2137,11 +2178,11 @@ function renderQueue(mode) {
   if (!box) return;
   const q = qArr(mode);
   if (!q.length) {
-    box.innerHTML = '<div class="muted tiny">从上面点怪物、点「+ 加入」；可以重复加同一只，顺序随便。没开始算的都能 × 掉。</div>';
+    box.innerHTML = '<div class="muted tiny">从上面点怪物、点「+ 加入」；也可以直接加「全部弱怪 / 全部普通怪 / 全部精英 / 全部Boss」，跑完会生成一张战损数据图。</div>';
   } else {
     box.innerHTML = q.map((it, i) => `<div class="q-item${it.running ? ' run' : ''}${it.done ? ' done' : ''}" data-i="${i}">
       <span class="q-idx">${i + 1}</span>
-      <span class="q-name" title="${esc(it.status || '')}">${encLink(it.enc, qName(it.enc))}</span>
+      <span class="q-name" title="${esc(it.status || '')}">${it.group ? esc(it.groupLabel || qGroupLabel(it.enc)) : encLink(it.enc, qName(it.enc))}${it.group ? ` <span class="muted tiny">${it.group.length} 只</span>` : ''}</span>
       <span class="q-st">${it.running ? '算着…' : it.done ? (it.winrate == null ? '完了' : `${(it.winrate * 100).toFixed(1)}%`) : '等着'}</span>
       <button class="ghost small" data-qdel="${i}" title="从队列里去掉（正在算的那只先点「■ 终止」）">×</button>
     </div>`).join('');
@@ -2149,7 +2190,7 @@ function renderQueue(mode) {
   const btn = $('#' + id.qRun);
   if (btn) btn.disabled = !q.some(it => !it.done);
   const add = $('#' + id.qAdd);
-  if (add) add.disabled = !state.encounter;
+  if (add) add.disabled = !state.encounter && !(state.encGroups || []).length;
   const cl = $('#' + id.qClear);
   if (cl) cl.disabled = !q.length;
   box.onclick = e => {
@@ -2176,6 +2217,19 @@ function qHint(mode, text) {
   setTimeout(() => d.remove(), 4000);
 }
 function addToQueue(mode) {
+  const groups = (state.encGroups || []).slice();
+  if (groups.length) {
+    // 选了几组就排几组（已经排在队里还没跑的不重复加）
+    for (const k of groups) {
+      const ids = groupIds(k);
+      if (!ids.length) continue;
+      const label = `${state.encMap || '全部'} · ${GROUP_KINDS[k] || '全部'}`;
+      if (qArr(mode).some(it => it.group && it.groupLabel === label && !it.done)) continue;
+      qArr(mode).push({ enc: '__GROUP', group: ids, groupLabel: label, done: false, running: false, winrate: null });
+    }
+    saveLocal(); renderQueue(mode);
+    return;
+  }
   if (!state.encounter) return;
   qArr(mode).push({ enc: state.encounter, done: false, running: false, winrate: null });
   saveLocal(); renderQueue(mode);
@@ -2215,6 +2269,45 @@ const QUEUE_RUN = {
   compare: { url: '/api/compare', body: cmpPayload, base: job => job.variants[0] },
   upgrade: { url: '/api/upgrade3', body: upgPayload, base: job => job.variants[0] },
 };
+/* 一组怪跑完：每只的胜率/战损/回合 + 选中那张牌的次数，交给服务端出一张数据图 */
+function estimateRowFrom(job, enc, mode) {
+  const v = (job.variants || [])[0] || {};
+  const s = v.summary || {};
+  let cardPlays = null;
+  if (mode !== 'single' && job.variants && job.variants.length > 1) {
+    const cand = job.variants[1];
+    const id = cand && cand.card && cand.card.cardId;
+    const p = id ? playsOf(cand.summary || {}, id) : null;
+    cardPlays = p ? p.avg : null;
+  }
+  return {
+    enc, name: qName(enc), winrate: s.winrate,
+    avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
+    avgTurns: s.avgTurns, cardPlays,
+  };
+}
+async function saveEstimateReport(it, mode) {
+  const cands = mode === 'compare'
+    ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
+    : mode === 'upgrade'
+      ? state.upPicks.map(i => cardName(state.deck[i] && state.deck[i].cardId)).join(' / ')
+      : '';
+  const title = `单卡战损预估 · ${it.groupLabel || '一组怪'}`;
+  try {
+    const r = await fetch('/api/estimate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title, map: state.encMap, kind: (it.groupLabel || '').split('·').pop().trim(),
+        candidate: cands, mode, count: state.count, rows: it.rows || [],
+      }),
+    });
+    const j = await r.json();
+    return r.ok && j.ok ? j : null;
+  } catch (e) {
+    reportError('数据图生成失败：' + e.message, e.stack || '');
+    return null;
+  }
+}
 async function runQueue(mode) {
   const q = qArr(mode);
   const first = q.findIndex(it => !it.done);
@@ -2222,7 +2315,8 @@ async function runQueue(mode) {
   if (!state.deck.length) { qHint(mode, '卡组是空的：先在「单场测算」里导入或组牌'); return; }
   if (mode === 'compare' && !state.cmpCards.length) { qHint(mode, '先选至少一张候选卡'); return; }
   if (mode === 'upgrade' && !state.upPicks.length) { qHint(mode, '先选至少一张要升级的牌'); return; }
-  if (!state.encounter) { qHint(mode, '先选一个遭遇'); return; }
+  if (!state.encounter && !(state.encGroups || []).length) { qHint(mode, '先选一个遭遇，或点上面的「全部弱怪 / 全部普通怪…」'); return; }
+  if ((state.encGroups || []).length && !qArr(mode).some(it => !it.done)) addToQueue(mode);
   autoCollapseMid();
   const cfg = QUEUE_RUN[mode];
   const id = ENC_IDS[mode];
@@ -2234,6 +2328,39 @@ async function runQueue(mode) {
     if (it.done) continue;
     it.running = true; renderQueue(mode);
     try {
+      /* ---- 名单压缩：一组怪，每只 1 场，跑完出数据图 ---- */
+      if (it.group && it.group.length) {
+        const rows = [];
+        const total = it.group.length;
+        for (let k = 0; k < total; k++) {
+          const sub = it.group[k];
+          it.status = `${k + 1}/${total} · ${qName(sub)}`; renderQueue(mode);
+          const body = cfg.body(sub);
+          // 场数就按上面「样本数」来，不写死；跑多少场由用户决定
+          const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.error || '提交失败');
+          const job = await pollJob(j.id, jb => {
+            if (jb) { it.status = `${k + 1}/${total} · ${jb.done}/${jb.total}`; renderQueue(mode); }
+            if (jb && jb.status === 'cancelled') stopped = true;
+          });
+          if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; it.running = false; renderQueue(mode); break; }
+          rows.push(estimateRowFrom(job, sub, mode));
+        }
+        if (stopped) { it.running = false; renderQueue(mode); break; }
+        it.rows = rows;
+        it.done = true; it.running = false; it.status = `${rows.length}/${total} 只`;
+        it.winrate = rows.length ? rows.reduce((a, b) => a + (b.winrate || 0), 0) / rows.length : null;
+        it.summary = {
+          winrate: it.winrate,
+          avgHpLost: rows.length ? rows.reduce((a, b) => a + (b.avgHpLost || 0), 0) / rows.length : null,
+          avgTurns: rows.length ? rows.reduce((a, b) => a + (b.avgTurns || 0), 0) / rows.length : null,
+        };
+        it.report = await saveEstimateReport(it, mode);
+        renderQueue(mode); renderQueueResults(mode);
+        continue;
+      }
+      /* ---- 单只怪 ---- */
       const body = cfg.body(it.enc);
       const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json();
@@ -2267,7 +2394,7 @@ async function runQueue(mode) {
     } catch (e) {
       it.running = false; it.status = '失败：' + e.message; it.error = e.message;
       renderQueue(mode);
-      reportError('排队第 ' + (i + 1) + ' 只失败：' + e.message, e.stack || '');
+      reportError('排队第 ' + (i + 1) + ' 项失败：' + e.message, e.stack || '');
       break;
     }
   }
@@ -2285,6 +2412,17 @@ function renderQueueResults(mode) {
     : '<tr><th>遭遇</th><th>基线胜率</th><th>最好的</th><th>战损</th><th>回合</th><th>这张牌每局</th></tr>';
   const rows = done.map(it => {
     const s = it.summary;
+    /* 一组怪（全部弱怪…）：排一行汇总，明细看数据图 */
+    if (it.group) {
+      const link = it.report ? `<a class="q-report-link" href="${it.report.url}" target="_blank" rel="noreferrer noopener" title="打开这张战损数据图（每只怪的掉血/胜率）">数据图 ↗</a>` : '—';
+      return `<tr class="q-group-row">
+        <td>${esc(it.groupLabel || '一组怪')}<span class="muted tiny"> ${it.group.length} 只</span></td>
+        <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b><span class="muted tiny"> 平均</span></td>
+        <td class="num" colspan="2">平均战损 ${(s.avgHpLost ?? 0).toFixed(1)}</td>
+        <td class="num">${s.avgTurns != null ? s.avgTurns + ' 回合' : '—'}</td>
+        <td class="num">${link}</td>
+      </tr>`;
+    }
     const common = `<td>${encLink(it.enc, qName(it.enc))}</td>
       <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>`;
     if (mode === 'single') {
@@ -2303,7 +2441,12 @@ function renderQueueResults(mode) {
       <td class="num">${b && b.plays != null ? `${fmtPlay(b.plays)} 次<span class="muted tiny">（基线 ${fmtPlay(b.basePlays)}）</span>` : '—'}</td>
     </tr>`;
   }).join('');
-  box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+  // 生成过的数据图都列出来，方便直接点开/另存
+  const reports = done.filter(it => it.report);
+  const repBox = reports.length
+    ? `<div class="q-reports">数据图：${reports.map(it => `<a href="${it.report.url}" target="_blank" rel="noreferrer noopener">${esc(it.report.name)}</a>`).join(' · ')}</div>`
+    : '';
+  box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>${repBox}`;
 }
 
 /* ================= 通用轮询 ================= */

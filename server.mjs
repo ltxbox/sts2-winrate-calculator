@@ -599,6 +599,94 @@ function publicVariant(v) {
   };
 }
 
+/* ---------- 单卡战损预估：把一组怪跑完，出一张数据图和一份能直接打开的 HTML ---------- */
+const EST_DIR = path.join(RUNS, 'estimates');
+fs.mkdirSync(EST_DIR, { recursive: true });
+
+const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function estimateHtml(d) {
+  const rows = (d.rows || []).filter(r => r && r.name);
+  const losses = rows.map(r => Number(r.avgHpLost) || 0);
+  const maxLoss = Math.max(1, ...losses);
+  const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
+  const worst = rows.slice().sort((a, b) => (Number(b.avgHpLost) || 0) - (Number(a.avgHpLost) || 0))[0];
+  const best = rows.slice().sort((a, b) => (Number(a.avgHpLost) || 0) - (Number(b.avgHpLost) || 0))[0];
+  const avgWr = rows.length ? rows.reduce((a, b) => a + (Number(b.winrate) || 0), 0) / rows.length : 0;
+  const barH = 26, gap = 10, labelW = 210, chartW = 900;
+  const bars = rows.slice().sort((a, b) => (Number(b.avgHpLost) || 0) - (Number(a.avgHpLost) || 0)).map((r, i) => {
+    const v = Number(r.avgHpLost) || 0;
+    const w = Math.max(2, Math.round((v / maxLoss) * (chartW - labelW - 90)));
+    const wr = Number(r.winrate) || 0;
+    const color = wr >= 0.99 ? '#3fa96a' : wr >= 0.7 ? '#c8a13a' : wr > 0 ? '#d1823a' : '#c65a5a';
+    const y = i * (barH + gap);
+    return `<g transform="translate(0,${y})">
+      <text x="0" y="17" fill="#cfd8e8" font-size="13">${escHtml(r.name)}</text>
+      <rect x="${labelW}" y="4" width="${w}" height="${barH - 8}" rx="4" fill="${color}" opacity="0.85"/>
+      <text x="${labelW + w + 8}" y="17" fill="#e6edf7" font-size="12">${v.toFixed(1)}</text>
+      <text x="${chartW - 70}" y="17" fill="${wr >= 0.999 ? '#7fd6a0' : '#e0b070'}" font-size="12">${(wr * 100).toFixed(0)}%</text>
+    </g>`;
+  }).join('');
+  const chartH = Math.max(40, rows.length * (barH + gap));
+  const table = rows.map(r => {
+    const wr = Number(r.winrate) || 0;
+    const lost = wr < 0.999;
+    const lo = r.minHpLost == null ? '' : r.minHpLost;
+    const hi = r.maxHpLost == null ? '' : r.maxHpLost;
+    const range = lo === hi || hi === '' ? String(lo) : `${lo}–${hi}`;
+    const lossTxt = r.avgHpLost == null ? '—' : Number(r.avgHpLost).toFixed(1);
+    const cardCol = d.mode && d.mode !== 'single';
+    return `<tr>
+      <td>${escHtml(r.name)}${lost ? ' <span class="lost">打不过</span>' : ''}</td>
+      <td class="num">${lossTxt}<span class="muted">${range ? '（' + escHtml(range) + '）' : ''}</span></td>
+      <td class="num" style="color:${wr >= 0.999 ? '#7fd6a0' : wr > 0 ? '#e0b070' : '#d76a6a'}">${(wr * 100).toFixed(0)}%</td>
+      <td class="num">${r.avgTurns == null ? '—' : r.avgTurns}</td>
+      ${cardCol ? `<td class="num">${r.cardPlays == null ? '—' : Number(r.cardPlays).toFixed(1)}</td>` : ''}
+    </tr>`;
+  }).join('');
+  const when = new Date().toLocaleString('zh-CN');
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>${escHtml(d.title || '单卡战损预估')}</title>
+<style>
+ body{margin:0;padding:28px 32px 40px;background:#14171d;color:#e6edf7;font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+ h1{font-size:20px;margin:0 0 4px} .sub{color:#93a1b5;font-size:12.5px;margin-bottom:18px}
+ .cards{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 20px}
+ .card{background:#1d222b;border:1px solid #2a3140;border-radius:10px;padding:10px 16px;min-width:150px}
+ .card b{display:block;font-size:20px;margin-top:2px} .card span{color:#8d9bb0;font-size:12px}
+ table{border-collapse:collapse;width:100%;margin-top:18px;font-size:13px}
+ th,td{border-bottom:1px solid #262d39;padding:6px 8px;text-align:left} th{color:#96a4b8;font-weight:500}
+ td.num{text-align:right;font-variant-numeric:tabular-nums} .muted{color:#77849a;font-size:11.5px} .lost{color:#d76a6a;font-size:11px;border:1px solid #6b3a3a;border-radius:4px;padding:0 4px}
+ .foot{margin-top:16px;color:#6f7c90;font-size:11.5px}
+</style></head><body>
+<h1>${escHtml(d.title || '单卡战损预估')}</h1>
+<div class="sub">${escHtml([d.map, d.kind, d.candidate ? '候选卡：' + d.candidate : '', (d.count || 1) + ' 场/只', when].filter(Boolean).join(' · '))}</div>
+<div class="cards">
+  <div class="card"><span>平均战损</span><b>${avgLoss.toFixed(1)}</b></div>
+  <div class="card"><span>最狠的一只</span><b>${escHtml(worst ? worst.name : '—')}</b><span>${worst ? (Number(worst.avgHpLost) || 0).toFixed(1) : ''}</span></div>
+  <div class="card"><span>最轻的一只</span><b>${escHtml(best ? best.name : '—')}</b><span>${best ? (Number(best.avgHpLost) || 0).toFixed(1) : ''}</span></div>
+  <div class="card"><span>平均胜率</span><b>${(avgWr * 100).toFixed(0)}%</b></div>
+  <div class="card"><span>怪物数</span><b>${rows.length}</b></div>
+</div>
+<svg width="${chartW}" height="${chartH + 24}" viewBox="0 0 ${chartW} ${chartH + 24}" xmlns="http://www.w3.org/2000/svg">
+  <text x="0" y="${chartH + 20}" fill="#77849a" font-size="11">横条＝平均战损（掉血），右边数字＝胜率；绿色=全胜，黄色=常胜，红色=打不过</text>
+  ${bars}
+</svg>
+<table><thead><tr><th>怪物</th><th>平均战损（区间）</th><th>胜率</th><th>回合</th>${d.mode && d.mode !== 'single' ? '<th>这张牌每局</th>' : ''}</tr></thead>
+<tbody>${table}</tbody></table>
+<div class="foot">每只怪按上方「样本数」跑 ${d.count || 1} 场；战损＝这些场次平均掉的血，「打不过」是没打过的那只（不算战损）。数据由包内 OfflineSearchHarness 现算。</div>
+</body></html>`;
+}
+
+function saveEstimate(d) {
+  const now = new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}`;
+  const safe = String(d.title || '单卡战损预估').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 60);
+  const name = `${safe}-${stamp}.html`;
+  fs.writeFileSync(path.join(EST_DIR, name), estimateHtml(d), 'utf8');
+  return { ok: true, name, file: path.join(EST_DIR, name), url: '/api/estimate/' + encodeURIComponent(name) };
+}
+
 function publicJob(job) {
   return {
     id: job.id, mode: job.mode, status: job.status, total: job.total, done: job.done,
@@ -1097,6 +1185,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/api/diag') {
       try { return send(res, 200, diagnose()); }
       catch (e) { return send(res, 500, { ok: false, harness: HARNESS.how, problems: [{ code: 'diag-crash', msg: '自检本身出错了：' + String(e && e.message || e), fix: '' }] }); }
+    }
+    if (req.method === 'POST' && u.pathname === '/api/estimate') {
+      const body = await readBody(req);
+      const rows = Array.isArray(body.rows) ? body.rows : [];
+      if (!rows.length) return send(res, 400, { error: '没有可写的数据' });
+      return send(res, 200, saveEstimate(body));
+    }
+    if (req.method === 'GET' && u.pathname.startsWith('/api/estimate/')) {
+      const name = path.basename(decodeURIComponent(u.pathname.slice('/api/estimate/'.length)));
+      const file = path.join(EST_DIR, name);
+      if (!fs.existsSync(file)) return send(res, 404, { error: 'not found' });
+      return send(res, 200, fs.readFileSync(file), 'text/html; charset=utf-8');
     }
     if (req.method === 'GET' && u.pathname === '/api/ping') {
       return send(res, 200, { ok: true, app: 'sts2-ui', pid: process.pid, port: PORT, version: 2, diag: true, dread: true });

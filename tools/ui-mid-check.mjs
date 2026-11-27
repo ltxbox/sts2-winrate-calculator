@@ -128,6 +128,17 @@ try {
   ok(collapsed.after > collapsed.before + 30, '左栏真的变宽了（不只是加了个 class）', `${collapsed.before}px → ${collapsed.after}px`);
   ok(collapsed.midW <= 60, '中间只剩一条窄带', `${collapsed.midW}px`);
 
+  // 收起后左栏变宽 → 卡组列表应该变成多列（不然一行横跨 1100px，中间全是空的）
+  const grid = await evaluate(`(() => {
+    const list = document.querySelector('#modeSingle .deck-list');
+    const cs = getComputedStyle(list);
+    const items = [...list.querySelectorAll('.deck-item')];
+    const tops = items.map(i => Math.round(i.getBoundingClientRect().top));
+    const firstRow = tops.filter(t => t === tops[0]).length;
+    return { cols: (cs.gridTemplateColumns || '').split(' ').filter(Boolean).length, firstRow, listH: Math.round(list.getBoundingClientRect().height) };
+  })()`);
+  ok(grid.cols >= 2 && grid.firstRow >= 2, '卡组列表摊成多列（一行不再横跨整个面板）', `${grid.cols} 列，第一行 ${grid.firstRow} 张，高 ${grid.listH}px`);
+
   // ---------- 2) 刷新后还是收起的 ----------
   await send('Page.reload', { ignoreCache: true });
   await sleep(600);
@@ -152,6 +163,21 @@ try {
     };
   })()`);
   ok(!expanded.collapsed && expanded.headShown, '点竖条能展开回来', `deck=${expanded.deckW}px`);
+
+  // ---------- 3.5) 卡组/卡池之间的分隔线能拖，双击回默认 ----------
+  const spBox = await evaluate(`(() => { const r = document.querySelector('#deckSplit').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, h: Math.round(document.querySelector('#deckList').getBoundingClientRect().height) }; })()`);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spBox.x, y: spBox.y, button: 'left', buttons: 1, clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: spBox.x, y: spBox.y + 40, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: spBox.x, y: spBox.y + 120, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: spBox.x, y: spBox.y + 120, button: 'left', buttons: 0, clickCount: 1 });
+  await sleep(250);
+  const dragged = await evaluate(`(() => ({ h: Math.round(document.querySelector('#deckList').getBoundingClientRect().height), saved: state.deckListH, splitH: Math.round(document.querySelector('#deckSplit').getBoundingClientRect().height) }))()`);
+  ok(dragged.h > spBox.h + 60 && dragged.saved > 0, '拖分隔线能把卡组拉高', `${spBox.h}px → ${dragged.h}px（存了 ${dragged.saved}）`);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spBox.x, y: spBox.y + 120, button: 'left', buttons: 1, clickCount: 2 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: spBox.x, y: spBox.y + 120, button: 'left', buttons: 0, clickCount: 2 });
+  await sleep(250);
+  const reset = await evaluate(`(() => ({ h: Math.round(document.querySelector('#deckList').getBoundingClientRect().height), saved: state.deckListH, inline: document.querySelector('#deckList').style.height }))()`);
+  ok(!reset.inline && reset.h >= 80, '双击分隔线回到默认高度', `${reset.h}px`);
 
   // ---------- 4) Alt+M 手操 ----------
   await send('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 1, key: 'm', code: 'KeyM', windowsVirtualKeyCode: 77, text: '' });

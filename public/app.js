@@ -42,6 +42,8 @@ const state = {
   // 中间「测算结果」栏收不收起来（收起后左栏变宽）；midAuto = 这次收起是开跑时自动做的，跑完要自动展开
   midCollapsed: false,
   midAuto: false,
+  // 卡组列表高度（px，拖分隔线设的；0 = 用默认 42%）
+  deckListH: 0,
 };
 
 /* 并发：按 CPU 核数取，16 核 -> 12（实测比 4 路快 1.74 倍） */
@@ -162,6 +164,39 @@ function bindMidCollapse() {
   applyMidCollapsed(!!state.midCollapsed);
 }
 
+/* ---------- 卡组 / 卡池之间的分隔线：上下拖，改卡组占多高（双击回默认 42%） ---------- */
+function bindDeckSplit() {
+  const list = $('#deckList'), sp = $('#deckSplit');
+  if (!list || !sp) return;
+  const panel = list.closest('.panel');
+  const clampH = h => {
+    const max = Math.max(140, (panel ? panel.clientHeight : 600) - 190);
+    return Math.max(80, Math.min(max, Math.round(h)));
+  };
+  const apply = h => {
+    const v = clampH(h);
+    list.style.height = v + 'px';
+    list.style.maxHeight = 'none';   // 拖过以后就按拖的来，别被默认的 42% 顶住
+    state.deckListH = v;
+    return v;
+  };
+  if (state.deckListH > 0) apply(state.deckListH);
+  let drag = null;
+  sp.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try { sp.setPointerCapture(e.pointerId); } catch { }
+    sp.classList.add('dragging');
+    drag = { y: e.clientY, h: list.getBoundingClientRect().height };
+  });
+  sp.addEventListener('pointermove', e => { if (drag) apply(drag.h + (e.clientY - drag.y)); });
+  const end = () => { if (!drag) return; drag = null; sp.classList.remove('dragging'); saveLocal(); };
+  sp.addEventListener('pointerup', end);
+  sp.addEventListener('pointercancel', end);
+  sp.addEventListener('dblclick', () => { list.style.height = ''; list.style.maxHeight = ''; state.deckListH = 0; saveLocal(); });
+  window.addEventListener('resize', () => { if (state.deckListH > 0) apply(state.deckListH); });
+}
+
 function saveLocal() {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
@@ -175,6 +210,7 @@ function saveLocal() {
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
         mode: state.mode, cmpCards: state.cmpCards, restOpts: state.restOpts, lastJob: state.lastJob,
         midCollapsed: !!state.midCollapsed,
+        deckListH: state.deckListH || 0,
       }));
     } catch { }
   }, 250);
@@ -215,6 +251,7 @@ function loadLocal() {
   if (s.lastJob && s.lastJob.id) state.lastJob = { id: String(s.lastJob.id), mode: s.lastJob.mode || 'single' };
   if (s.restOpts) state.restOpts = { ...state.restOpts, ...s.restOpts };
   state.midCollapsed = !!s.midCollapsed;
+  state.deckListH = Number.isFinite(s.deckListH) ? s.deckListH : 0;
   const st = starterRelicOf(state.character);
   if (st) state.relics = state.relics.filter(r => r !== st);
   return true;
@@ -1871,7 +1908,7 @@ if (_p.has('autotest')) {
 if (_p.has('refresh')) {
   setTimeout(refreshFromGame, 400);
 }
-init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); });
+init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); });
 
 /* ---------- 截图导入：卡组 + 遗物 ---------- */
 const shot = { img: null, cards: [], relics: [], feats: null };

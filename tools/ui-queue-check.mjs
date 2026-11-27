@@ -94,11 +94,11 @@ try {
 
   // ---------- 2) 排队 ----------
   const add = await evaluate(`(() => {
-    state.encounter = 'LAGAVULIN_MATRIARCH_BOSS'; renderEncList();
+    state.encounter = 'LAGAVULIN_MATRIARCH_BOSS'; renderEncLists();
     document.querySelector('#qAdd').click();
     document.querySelector('#qAdd').click();
     const a = document.querySelectorAll('#qList .q-item').length;
-    state.encounter = 'CEREMONIAL_BEAST_BOSS'; renderEncList();
+    state.encounter = 'CEREMONIAL_BEAST_BOSS'; renderEncLists();
     document.querySelector('#qAdd').click();
     const b = document.querySelectorAll('#qList .q-item').length;
     return { afterDup: a, afterThird: b, names: [...document.querySelectorAll('#qList .q-name')].map(x => x.textContent.trim()) };
@@ -232,6 +232,59 @@ try {
   ok(rest.opts.filter(t => t.includes('打击')).length === 2, '同名两行在下拉里是两条、带「第 N 行」', rest.opts.join(' / '));
   ok(rest.targetIndex === 1, '选第二行时服务端收到 targetIndex=1（不是按卡名整组升）', `targetIndex=${rest.targetIndex} label=${rest.label}`);
 
+  // ---------- 6) 自选对比 / 多选一升级 也有同一套遭遇面板 + 排队 ----------
+  const cmpPanel = await evaluate(`(async () => {
+    document.querySelector('[data-mode=compare]').click();
+    await new Promise(r => setTimeout(r, 400));
+    const items = document.querySelectorAll('#cmpEncList .enc-item').length;
+    const links = document.querySelectorAll('#cmpEncList .enc-ext').length;
+    const tabs = document.querySelectorAll('#cmpEncTabs button').length;
+    document.querySelector('#cmpQAdd').click();
+    const q = document.querySelectorAll('#cmpQList .q-item').length;
+    return { items, links, tabs, q };
+  })()`);
+  ok(cmpPanel.items > 0 && cmpPanel.links === cmpPanel.items, '自选对比里有和单场一样的遭遇列表（带资料链接）', `${cmpPanel.links}/${cmpPanel.items} 条 · ${cmpPanel.tabs} 个分类`);
+  ok(cmpPanel.q === 1, '自选对比能加进自己的排队', `${cmpPanel.q} 项`);
+
+  const upPanel = await evaluate(`(async () => {
+    document.querySelector('[data-mode=upgrade]').click();
+    await new Promise(r => setTimeout(r, 400));
+    const items = document.querySelectorAll('#upEncList .enc-item').length;
+    const links = document.querySelectorAll('#upEncList .enc-ext').length;
+    document.querySelector('#upQAdd').click();
+    const q = document.querySelectorAll('#upQList .q-item').length;
+    return { items, links, q };
+  })()`);
+  ok(upPanel.items > 0 && upPanel.links === upPanel.items, '多选一升级里也是同一套遭遇列表', `${upPanel.links}/${upPanel.items} 条`);
+  ok(upPanel.q === 1, '多选一升级能加进自己的排队', `${upPanel.q} 项`);
+
+  const cmpQueue = await evaluate(`(async () => {
+    document.querySelector('[data-mode=compare]').click();
+    await new Promise(r => setTimeout(r, 300));
+    const card = (state.meta.cards || []).find(c => c.type === 1) || (state.meta.cards || [])[0];
+    state.cmpCards = [{ cardId: card.id, upgradeLevels: 0 }];
+    document.querySelector('#count').value = '2';
+    document.querySelector('#count').dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#cmpBudget').value = '3000';
+    document.querySelector('#cmpQRun').click();
+    const t0 = Date.now();
+    let rows = 0;
+    while (Date.now() - t0 < 300000) {
+      rows = document.querySelectorAll('#cmpQResult .q-table tbody tr').length;
+      if (rows >= 1) break;
+      await new Promise(r => setTimeout(r, 600));
+    }
+    return { rows, head: [...document.querySelectorAll('#cmpQResult th')].map(x => x.textContent.trim()),
+      first: (document.querySelector('#cmpQResult tbody tr') || {}).textContent || '' };
+  })()`);
+  ok(cmpQueue.rows === 1, '对比模式的排队真跑完了并出了表', `${cmpQueue.rows} 行`);
+  ok(cmpQueue.head.includes('基线胜率') && cmpQueue.head.includes('最好的'), '对比排队表多列「基线胜率 / 最好的」', cmpQueue.head.join(' / '));
+
+  const restLabel = await evaluate(`(() => {
+    document.querySelector('[data-mode=rest]').click();
+    return [...document.querySelectorAll('#restCard option')].map(o => o.textContent.trim());
+  })()`);
+  ok(restLabel.every(t => !/×\d/.test(t) && !/已升 \d/.test(t)), '睡觉下拉里不再有「×张数」「已升 N」', restLabel.slice(0, 3).join(' / '));
   await send('Page.captureScreenshot', { format: 'png' }).then(async (r) => {
     if (r.result?.data) {
       const fs = await import('node:fs');

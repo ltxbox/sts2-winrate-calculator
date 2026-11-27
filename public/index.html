@@ -39,7 +39,7 @@
 <nav class="modes" id="modes">
   <button data-mode="single" class="active">单场测算</button>
   <button data-mode="compare">自选对比</button>
-  <button data-mode="upgrade">三选一升级</button>
+  <button data-mode="upgrade">多选一升级</button>
   <button data-mode="rest">升级 vs 睡觉</button>
 </nav>
 
@@ -97,20 +97,8 @@
     <div id="resultList" class="result-list"></div>
   </section>
 
-  <section class="panel enc-panel">
-    <div class="panel-head"><h3>遭遇</h3><input id="encSearch" type="search" placeholder="搜索怪物"></div>
-    <div class="tabs" id="encTabs">
-      <button data-kind="boss" class="active">Boss</button>
-      <button data-kind="elite">精英</button>
-      <button data-kind="normal">普通</button>
-      <button data-kind="weak">弱怪</button>
-      <button data-kind="event">事件</button>
-    </div>
-    <div id="encList" class="enc-list"></div>
-    <div class="panel-head pool-head queue-head"><h3>排队（多怪连着算）</h3><button id="qAdd" class="ghost small" title="把当前选中的遭遇加进队列">+ 加入</button><button id="qRun" class="primary small" title="按队列顺序一只一只算">开始排队</button><button id="qClear" class="ghost small">清空</button></div>
-    <div id="qList" class="queue-list"><div class="muted tiny">从上面点怪物、点「+ 加入」；可以重复加同一只，顺序随便。没开始算的都能 × 掉。</div></div>
-    <div id="qResult" class="queue-result"></div>
-  </section>
+
+  <section class="panel enc-panel" id="encPanel"></section>
 </main>
 
 <main class="cols cols-compare hidden" id="modeCompare">
@@ -133,13 +121,14 @@
   <section class="panel mid-panel">
     <div class="panel-head">
       <h3>对比结果</h3>
-      <label class="inline">遭遇<select id="cmpEnc"></select></label>
       <label class="inline">预算ms<input id="cmpBudget" type="number" value="8000" style="width:70px"></label>
       <span id="cmpProgress" class="muted tiny"></span>
       <button id="cmpRun" class="primary small push-right">开始对比</button>
     </div>
     <div id="cmpResult" class="cmp-result"><div class="empty">选 1–10 张卡，点「开始对比」</div></div>
   </section>
+
+  <section class="panel enc-panel" id="cmpEncPanel"></section>
 </main>
 
 <main class="cols cols-compare hidden" id="modeUpgrade">
@@ -154,13 +143,14 @@
   <section class="panel mid-panel">
     <div class="panel-head">
       <h3>升级对比</h3>
-      <label class="inline">遭遇<select id="upEnc"></select></label>
       <label class="inline">预算ms<input id="upBudget" type="number" value="8000" style="width:70px"></label>
       <span id="upProgress" class="muted tiny"></span>
       <button id="upRun" class="primary small push-right">开始对比</button>
     </div>
     <div id="upResult" class="cmp-result"><div class="empty">在左边选要升级的牌（1–10 张），点「开始对比」</div></div>
   </section>
+
+  <section class="panel enc-panel" id="upEncPanel"></section>
 </main>
 
 <main class="cols cols-compare hidden" id="modeRest">

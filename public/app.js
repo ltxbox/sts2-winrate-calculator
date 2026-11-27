@@ -202,6 +202,16 @@ function bindDeckSplit() {
   window.addEventListener('resize', () => { if (state.deckListH > 0) apply(state.deckListH); });
 }
 
+function qStore(q) {
+  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null }));
+}
+function qRestore(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter(it => it && it.enc).map(it => ({
+    enc: it.enc, done: !!it.done, running: false,
+    winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, status: '',
+  }));
+}
 function saveLocal() {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
@@ -215,7 +225,9 @@ function saveLocal() {
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
         mode: state.mode, cmpCards: state.cmpCards, restOpts: state.restOpts, lastJob: state.lastJob,
         midCollapsed: !!state.midCollapsed,
-        queue: (state.queue || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null })),
+        queue: qStore(state.queue),
+        queueCmp: qStore(state.queueCmp),
+        queueUp: qStore(state.queueUp),
         deckListH: state.deckListH || 0,
       }));
     } catch { }
@@ -249,9 +261,9 @@ function loadLocal() {
   if (Number.isFinite(s.actIndex)) state.actIndex = s.actIndex;
   if (s.gameMode === 'Dread' || s.gameMode === 'Standard') state.gameMode = s.gameMode;
   if (typeof s.dreadBoss === 'string') state.dreadBoss = s.dreadBoss;
-  if (Array.isArray(s.queue)) {
-    state.queue = s.queue.filter(it => it && it.enc).map(it => ({ enc: it.enc, done: !!it.done, running: false, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, status: '' }));
-  }
+  state.queue = qRestore(s.queue);
+  state.queueCmp = qRestore(s.queueCmp);
+  state.queueUp = qRestore(s.queueUp);
   if (Number.isFinite(s.count)) state.count = s.count;
   if (s.prefix) state.prefix = s.prefix;
   if (s.potionPolicy) state.potionPolicy = s.potionPolicy;
@@ -439,8 +451,8 @@ async function init() {
   renderRelicChips();
   renderDeck();
   renderPool();
-  renderEncTabs();
-  renderEncList();
+
+
   renderResults();
   bindDeckPool();
   bindPresets();
@@ -1088,7 +1100,7 @@ async function refreshFromGame() {
     if (enc) {
       state.encKind = enc.kind;
       $$('#encTabs button').forEach(x => x.classList.toggle('active', x.dataset.kind === enc.kind));
-      renderEncList();
+      renderEncLists();
     }
     const t = j.savedAt ? new Date(j.savedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
     $('#refreshInfo').textContent = '存档 ' + t + (merged.warnings.length ? ` · ⚠ ${merged.warnings.length} 种卡附魔不统一，见控制台` : '');
@@ -1128,35 +1140,84 @@ function encLink(id, name) {
   return `<a class="enc-link" href="${encUrl(id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">${esc(name || id)} ↗</a>`;
 }
 
-function renderEncTabs() {
-  $('#encTabs').onclick = e => {
+/* 三个模式共用一套「遭遇 + 排队」面板：同一份内容、同一套 id 规则，只是挂在不同容器里 */
+const ENC_IDS = {
+  single: { search: 'encSearch', tabs: 'encTabs', list: 'encList', qAdd: 'qAdd', qRun: 'qRun', qClear: 'qClear', qList: 'qList', qResult: 'qResult' },
+  compare: { search: 'cmpEncSearch', tabs: 'cmpEncTabs', list: 'cmpEncList', qAdd: 'cmpQAdd', qRun: 'cmpQRun', qClear: 'cmpQClear', qList: 'cmpQList', qResult: 'cmpQResult' },
+  upgrade: { search: 'upEncSearch', tabs: 'upEncTabs', list: 'upEncList', qAdd: 'upQAdd', qRun: 'upQRun', qClear: 'upQClear', qList: 'upQList', qResult: 'upQResult' },
+};
+const ENC_KINDS = [['boss', 'Boss'], ['elite', '精英'], ['normal', '普通'], ['weak', '弱怪'], ['event', '事件']];
+const ENC_MOUNTED = {};   // mode -> root element
+
+function mountEncPanel(rootSel, mode) {
+  const root = typeof rootSel === 'string' ? $(rootSel) : rootSel;
+  if (!root) return;
+  const id = ENC_IDS[mode];
+  root.innerHTML = `
+    <div class="panel-head"><h3>遭遇</h3><input id="${id.search}" type="search" placeholder="搜索怪物"></div>
+    <div class="tabs" id="${id.tabs}">
+      ${ENC_KINDS.map(([k, label]) => `<button data-kind="${k}"${k === state.encKind ? ' class="active"' : ''}>${label}</button>`).join('')}
+    </div>
+    <div id="${id.list}" class="enc-list"></div>
+    <div class="panel-head pool-head queue-head"><h3>排队（多怪连着算）</h3>
+      <button id="${id.qAdd}" class="ghost small" title="把当前选中的遭遇加进队列">+ 加入</button>
+      <button id="${id.qRun}" class="primary small" title="按队列顺序一只一只算">开始排队</button>
+      <button id="${id.qClear}" class="ghost small">清空</button></div>
+    <div id="${id.qList}" class="queue-list"></div>
+    <div id="${id.qResult}" class="queue-result"></div>`;
+  ENC_MOUNTED[mode] = root;
+  const tabs = $('#' + id.tabs);
+  tabs.onclick = e => {
     const b = e.target.closest('button[data-kind]');
     if (!b) return;
     state.encKind = b.dataset.kind;
-    $$('#encTabs button').forEach(x => x.classList.toggle('active', x === b));
-    renderEncList();
+    renderEncLists();
   };
-  $('#encSearch').oninput = renderEncList;
+  const search = $('#' + id.search);
+  search.value = state.encQ || '';
+  search.oninput = () => { state.encQ = search.value; renderEncLists(); };
+  const qAdd = $('#' + id.qAdd);
+  if (qAdd) qAdd.onclick = () => addToQueue(mode);
+  const qRunBtn = $('#' + id.qRun);
+  if (qRunBtn) qRunBtn.onclick = () => runQueue(mode);
+  const qClear = $('#' + id.qClear);
+  if (qClear) qClear.onclick = () => {
+    if (qArr(mode).some(it => it.running)) { qHint(mode, '有任务正在算——先点上面「■ 终止」'); return; }
+    state[mode === 'single' ? 'queue' : mode === 'compare' ? 'queueCmp' : 'queueUp'] = [];
+    saveLocal(); renderQueue(mode); renderQueueResults(mode);
+  };
+  renderEncLists();
+  renderQueue(mode);
+  renderQueueResults(mode);
 }
 
-function renderEncList() {
-  const q = $('#encSearch').value.trim().toLowerCase();
-  const list = state.meta.encounters.filter(e => e.kind === state.encKind && (!q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q)));
-  $('#encList').innerHTML = list.map(e => `
-    <div class="enc-item ${state.encounter === e.id ? 'active' : ''}" data-id="${esc(e.id)}">
-      <span>${esc(e.name)}</span><a class="enc-ext" href="${encUrl(e.id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">资料 ↗</a>
-      <span class="id">${esc(e.id)}</span>
-    </div>`).join('') || '<div class="empty">没有匹配的遭遇</div>';
-  $('#encList').onclick = e => {
-    if (e.target.closest('.enc-ext')) return;   // 点「资料 ↗」是开外链，不改当前遭遇
-    const it = e.target.closest('.enc-item');
-    if (!it) return;
-    state.encounter = it.dataset.id;
-    renderEncList();
-    renderQueue();
-  };
+function renderEncLists() {
+  const q = String(state.encQ || '').trim().toLowerCase();
+  const list = state.meta.encounters.filter(e => e.kind === state.encKind
+    && (!q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q)));
+  for (const [mode, root] of Object.entries(ENC_MOUNTED)) {
+    const id = ENC_IDS[mode];
+    const box = $('#' + id.list);
+    if (!box) continue;
+    box.innerHTML = list.map(e => `
+      <div class="enc-item ${state.encounter === e.id ? 'active' : ''}" data-id="${esc(e.id)}">
+        <span>${esc(e.name)}</span><a class="enc-ext" href="${encUrl(e.id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">资料 ↗</a>
+        <span class="id">${esc(e.id)}</span>
+      </div>`).join('') || '<div class="empty">没有匹配的遭遇</div>';
+    box.onclick = ev => {
+      if (ev.target.closest('.enc-ext')) return;   // 点「资料 ↗」是开外链，不改当前遭遇
+      const it = ev.target.closest('.enc-item');
+      if (!it) return;
+      state.encounter = it.dataset.id;
+      renderEncLists();
+      renderQueueAll();
+    };
+    const tabs = $('#' + id.tabs);
+    if (tabs) $$('#' + id.tabs + ' button').forEach(x => x.classList.toggle('active', x.dataset.kind === state.encKind));
+    const s = $('#' + id.search);
+    if (s && s.value !== (state.encQ || '')) s.value = state.encQ || '';
+  }
 }
-
 /* ---------- run + results ---------- */
 async function run() {
   if (!state.deck.length) { alert('卡组不能为空'); return; }
@@ -1529,6 +1590,7 @@ function attrBlock(attr, title, opts) {
 
 /* ================= 模式切换 ================= */
 function buildEncSelect(sel, value) {
+  if (!sel) return;
   const kinds = [['boss', 'Boss'], ['elite', '精英'], ['normal', '普通'], ['weak', '弱怪'], ['event', '事件']];
   sel.innerHTML = kinds.map(([k, n]) => {
     const list = state.meta.encounters.filter(e => e.kind === k);
@@ -1553,21 +1615,21 @@ function bindModes() {
     if (state.mode === 'rest') { renderRestPanel(); renderRestState(); }
     if (state.mode === 'upgrade') renderUpgradeAll();
   };
-  // 三选一升级
+  // 多选一升级
   state.upPicks = state.upPicks || [];
   const upRunBtn = $('#upRun');
   if (upRunBtn) upRunBtn.onclick = runUpgrade;
   const upClearBtn = $('#upClear');
   if (upClearBtn) upClearBtn.onclick = () => { state.upPicks = []; renderUpSlots(); renderUpDeck(); };
-  const upEncSel = $('#upEnc');
-  if (upEncSel) upEncSel.onchange = e => { state.encounter = e.target.value; renderUpState(); renderCmpState(); renderRestState(); };
+
+
   // 三卡对比
   state.cmpCards = state.cmpCards || [];
   $('#cmpSearch').oninput = renderCmpPool;
   $('#cmpType').onchange = renderCmpPool;
   $('#cmpClear').onclick = () => { state.cmpCards = []; renderCmpSlots(); };
   $('#cmpRun').onclick = runCompare;
-  $('#cmpEnc').onchange = e => { state.encounter = e.target.value; renderCmpState(); };
+
   // 升级 vs 睡觉
   $('#restRun').onclick = runRest;
   ['#restPct', '#restBase', '#restPillow', '#restFurnace'].forEach(s => $(s).oninput = renderRestMath);
@@ -1636,7 +1698,6 @@ function attachJob(id, mode) {
 
 /* ================= 三卡对比 ================= */
 function renderCmpState() {
-  buildEncSelect($('#cmpEnc'), state.encounter);
   const n = state.deck.reduce((s, d) => s + d.count, 0);
   $('#cmpState').innerHTML = [
     `<div>卡组 <b>${n}</b> 张 · 遗物 <b>${state.relics.length}</b> 件</div>`,
@@ -1852,8 +1913,6 @@ function renderUpDeck() {
   };
 }
 function renderUpState() {
-  const sel = $('#upEnc');
-  if (sel) buildEncSelect(sel, state.encounter);
   const n = state.deck.reduce((s, d) => s + d.count, 0);
   const cnt = $('#upDeckCount');
   if (cnt) cnt.textContent = `${n} 张 · 血 ${state.hp}/${state.maxHp} · 飞升 ${state.ascension}`;
@@ -1925,8 +1984,9 @@ function renderRestPanel() {
     const up = d.upgradeLevels || 0;
     const dup = state.deck.filter(x => x.cardId === d.cardId).length > 1;
     const tag = dup ? `（第 ${i + 1} 行）` : '';
-    const gone = up >= d.count ? ' · 这行已升满' : '';
-    return `<option value="${i}" ${String(i) === cur ? 'selected' : ''}${up >= d.count ? ' disabled' : ''}>${esc(c.name)}${up ? '（已升 ' + up + '）' : ''} ×${d.count}${tag}${gone}</option>`;
+    // 只写「第 N 行」区分同名行；不写 ×张数 / 已升几，免得让人以为能一次升多张——一次只升 1 张
+    const gone = up >= d.count ? ' · 已升满' : '';
+    return `<option value="${i}" ${String(i) === cur ? 'selected' : ''}${up >= d.count ? ' disabled' : ''}>${esc(c.name)}${tag}${gone}</option>`;
   }).join('') || '<option value="">卡组为空</option>';
   renderRestState();
   renderRestMath();
@@ -2016,15 +2076,23 @@ function renderRest(job) {
   $('#restResult').innerHTML = `<div class="verdict">${verdict}<div class="muted tiny" style="margin-top:4px">${esc(math)}</div></div><div class="cmp-cards">${rows}</div>`;
 }
 
-/* ================= 排队：把多只怪排成一条队，一只一只算 ================= */
+/* ================= 排队：三个模式各一条队，一只一只算 ================= */
+function qArr(mode) {
+  if (mode === 'compare') { if (!state.queueCmp) state.queueCmp = []; return state.queueCmp; }
+  if (mode === 'upgrade') { if (!state.queueUp) state.queueUp = []; return state.queueUp; }
+  if (!state.queue) state.queue = [];
+  return state.queue;
+}
 function qName(id) {
   const e = state.encById.get(id);
   return e ? e.name : id;
 }
-function renderQueue() {
-  const box = $('#qList');
+function renderQueue(mode) {
+  const id = ENC_IDS[mode];
+  if (!id) return;
+  const box = $('#' + id.qList);
   if (!box) return;
-  const q = state.queue || [];
+  const q = qArr(mode);
   if (!q.length) {
     box.innerHTML = '<div class="muted tiny">从上面点怪物、点「+ 加入」；可以重复加同一只，顺序随便。没开始算的都能 × 掉。</div>';
   } else {
@@ -2035,25 +2103,26 @@ function renderQueue() {
       <button class="ghost small" data-qdel="${i}" title="从队列里去掉（正在算的那只先点「■ 终止」）">×</button>
     </div>`).join('');
   }
-  const btn = $('#qRun');
+  const btn = $('#' + id.qRun);
   if (btn) btn.disabled = !q.some(it => !it.done);
-  const add = $('#qAdd');
+  const add = $('#' + id.qAdd);
   if (add) add.disabled = !state.encounter;
-  const cl = $('#qClear');
+  const cl = $('#' + id.qClear);
   if (cl) cl.disabled = !q.length;
   box.onclick = e => {
     const del = e.target.closest('[data-qdel]');
     if (!del) return;
     const i = Number(del.dataset.qdel);
-    const it = state.queue[i];
-    if (it && it.running) { qHint('这只正在算——先点上面「■ 终止」'); return; }
-    state.queue.splice(i, 1);
-    saveLocal(); renderQueue();
+    const it = qArr(mode)[i];
+    if (it && it.running) { qHint(mode, '这只正在算——先点上面「■ 终止」'); return; }
+    qArr(mode).splice(i, 1);
+    saveLocal(); renderQueue(mode);
   };
 }
-let qHintTimer = null;
-function qHint(text) {
-  const box = $('#qResult');
+function renderQueueAll() { for (const m of Object.keys(ENC_IDS)) renderQueue(m); }
+function qHint(mode, text) {
+  const id = ENC_IDS[mode];
+  const box = $('#' + id.qResult);
   if (!box) return;
   const old = box.querySelector('.q-warn');
   if (old) old.remove();
@@ -2061,44 +2130,91 @@ function qHint(text) {
   d.className = 'q-warn muted tiny';
   d.textContent = text;
   box.prepend(d);
-  clearTimeout(qHintTimer);
-  qHintTimer = setTimeout(() => d.remove(), 4000);
+  setTimeout(() => d.remove(), 4000);
 }
-function addToQueue() {
+function addToQueue(mode) {
   if (!state.encounter) return;
-  state.queue = state.queue || [];
-  state.queue.push({ enc: state.encounter, done: false, running: false, winrate: null });
-  saveLocal(); renderQueue();
+  qArr(mode).push({ enc: state.encounter, done: false, running: false, winrate: null });
+  saveLocal(); renderQueue(mode);
 }
-async function runQueue() {
-  const q = state.queue || [];
+/* 三个模式各自的请求体（排队和单独跑共用，别写成两份） */
+function solvePayload(enc) {
+  return {
+    deck: deckForRequest(), relics: relicsForRequest(), potions: state.potions, encounter: enc,
+    character: state.character, ascension: state.ascension, actIndex: state.actIndex || 0,
+    ...modePayload(), hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'Q',
+    potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
+    nodes: 100000, budget: 5000,
+  };
+}
+function cmpPayload(enc) {
+  return {
+    deck: deckForRequest(), relics: relicsForRequest(), potions: state.potions, encounter: enc,
+    character: state.character, ascension: state.ascension, actIndex: state.actIndex || 0,
+    ...modePayload(), hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'CMP',
+    potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
+    nodes: 100000, budget: Number($('#cmpBudget') && $('#cmpBudget').value) || 8000,
+    candidates: state.cmpCards.map(c => ({ cardId: c.cardId, upgradeLevels: c.upgradeLevels || 0 })),
+  };
+}
+function upgPayload(enc) {
+  return {
+    deck: deckForRequest(), relics: relicsForRequest(), potions: state.potions, encounter: enc,
+    character: state.character, ascension: state.ascension, actIndex: state.actIndex || 0,
+    ...modePayload(), hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'UP',
+    potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
+    nodes: 100000, budget: Number($('#upBudget') && $('#upBudget').value) || 8000,
+    picks: state.upPicks.map(i => ({ index: i })),
+  };
+}
+const QUEUE_RUN = {
+  single: { url: '/api/solve', body: solvePayload, base: job => job.variants[0] },
+  compare: { url: '/api/compare', body: cmpPayload, base: job => job.variants[0] },
+  upgrade: { url: '/api/upgrade3', body: upgPayload, base: job => job.variants[0] },
+};
+async function runQueue(mode) {
+  const q = qArr(mode);
   const first = q.findIndex(it => !it.done);
-  if (first < 0) { qHint('队列都算完了'); return; }
+  if (first < 0) { qHint(mode, '队列都算完了'); return; }
+  if (!state.deck.length) { qHint(mode, '卡组是空的：先在「单场测算」里导入或组牌'); return; }
+  if (mode === 'compare' && !state.cmpCards.length) { qHint(mode, '先选至少一张候选卡'); return; }
+  if (mode === 'upgrade' && !state.upPicks.length) { qHint(mode, '先选至少一张要升级的牌'); return; }
+  if (!state.encounter) { qHint(mode, '先选一个遭遇'); return; }
   autoCollapseMid();
-  const btn = $('#qRun');
+  const cfg = QUEUE_RUN[mode];
+  const id = ENC_IDS[mode];
+  const btn = $('#' + id.qRun);
   if (btn) btn.disabled = true;
   let stopped = false;
   for (let i = first; i < q.length; i++) {
     const it = q[i];
     if (it.done) continue;
-    it.running = true; renderQueue();
+    it.running = true; renderQueue(mode);
     try {
-      const body = queuePayload(it.enc);
-      const r = await fetch('/api/solve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const body = cfg.body(it.enc);
+      const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || '提交失败');
       const job = await pollJob(j.id, jb => {
-        if (jb) { it.status = `${jb.done}/${jb.total} · ${jb.elapsedSec || 0}s`; renderQueue(); }
+        if (jb) { it.status = `${jb.done}/${jb.total} · ${jb.elapsedSec || 0}s`; renderQueue(mode); }
         if (jb && jb.status === 'cancelled') stopped = true;
       });
       it.running = false;
-      if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; renderQueue(); break; }
-      const s = (job.variants && job.variants[0] && job.variants[0].summary) || {};
+      if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; renderQueue(mode); break; }
+      const baseV = cfg.base(job) || {};
+      const s = baseV.summary || {};
       it.done = true; it.winrate = s.winrate; it.summary = s; it.status = '';
-      renderQueue(); renderQueueResults();
+      // 对比/升级还有「哪张最好、差多少」
+      if (mode !== 'single' && job.variants && job.variants.length > 1) {
+        const cands = job.variants.slice(1).map(v => ({ label: (v.card && cardName(v.card.cardId)) || v.label, s: v.summary || {} }));
+        cands.sort((a, b) => (b.s.winrate || 0) - (a.s.winrate || 0) || ((a.s.avgHpLost ?? 999) - (b.s.avgHpLost ?? 999)));
+        const best = cands[0];
+        it.best = best ? { label: best.label, dpp: ((best.s.winrate || 0) - (s.winrate || 0)) * 100, winrate: best.s.winrate } : null;
+      }
+      renderQueue(mode); renderQueueResults(mode);
     } catch (e) {
       it.running = false; it.status = '失败：' + e.message; it.error = e.message;
-      renderQueue();
+      renderQueue(mode);
       reportError('排队第 ' + (i + 1) + ' 只失败：' + e.message, e.stack || '');
       break;
     }
@@ -2106,36 +2222,36 @@ async function runQueue() {
   if (btn) btn.disabled = false;
   autoExpandMid();
 }
-function queuePayload(enc) {
-  const deck = state.deck.map(d => ({
-    cardId: d.cardId, count: d.count, upgradeLevels: d.upgradeLevels || 0,
-    enchantmentId: d.enchantmentId || null, enchantmentAmount: d.enchantmentAmount || 0,
-  }));
-  return {
-    deck, relics: relicsForRequest(), potions: state.potions, encounter: enc,
-    character: state.character, ascension: state.ascension, ...modePayload(), actIndex: state.actIndex || 0,
-    hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'Q',
-    potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
-    nodes: 100000, budget: Number($('#budget') && $('#budget').value) || 8000,
-  };
-}
-function renderQueueResults() {
-  const box = $('#qResult');
+function renderQueueResults(mode) {
+  const id = ENC_IDS[mode];
+  const box = $('#' + id.qResult);
   if (!box) return;
-  const done = (state.queue || []).filter(it => it.done && it.summary);
+  const done = qArr(mode).filter(it => it.done && it.summary);
   if (!done.length) { box.innerHTML = ''; return; }
+  const head = mode === 'single'
+    ? '<tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr>'
+    : '<tr><th>遭遇</th><th>基线胜率</th><th>最好的</th><th>战损</th><th>回合</th><th>每局打出</th></tr>';
   const rows = done.map(it => {
     const s = it.summary;
-    return `<tr>
-      <td>${encLink(it.enc, qName(it.enc))}</td>
-      <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>
+    const common = `<td>${encLink(it.enc, qName(it.enc))}</td>
+      <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>`;
+    if (mode === 'single') {
+      return `<tr>${common}
+        <td class="num">${hpRangeText(s)}</td>
+        <td class="num">${s.avgTurns != null ? s.avgTurns : '—'}</td>
+        <td class="num">${s.playsPerRun != null ? s.playsPerRun : '—'}</td>
+        <td class="num">${(s.attrTotal != null && s.playsTotal) ? (s.attrTotal / s.playsTotal).toFixed(1) : '—'}</td>
+      </tr>`;
+    }
+    const b = it.best;
+    return `<tr>${common}
+      <td class="num">${b ? `${esc(b.label)} <span class="${b.dpp > 0 ? 'up' : b.dpp < 0 ? 'down' : 'same'}">${b.dpp > 0 ? '+' : ''}${b.dpp.toFixed(1)}pp</span>` : '—'}</td>
       <td class="num">${hpRangeText(s)}</td>
       <td class="num">${s.avgTurns != null ? s.avgTurns : '—'}</td>
       <td class="num">${s.playsPerRun != null ? s.playsPerRun : '—'}</td>
-      <td class="num">${(s.attrTotal != null && s.playsTotal) ? (s.attrTotal / s.playsTotal).toFixed(1) : '—'}</td>
     </tr>`;
   }).join('');
-  box.innerHTML = `<table class="q-table"><thead><tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr></thead><tbody>${rows}</tbody></table>`;
+  box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }
 
 /* ================= 通用轮询 ================= */
@@ -2202,23 +2318,15 @@ if (_p.has('refresh')) {
 }
 init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); bindQueue(); });
 
-/* 队列与终止按钮的绑定（排在 init 之后，元素一定在了） */
+/* 终止按钮 + 三个模式各自的「遭遇/排队」面板挂载 */
 function bindQueue() {
   const stop = $('#stopRun');
   if (stop) stop.onclick = stopRunning;
   syncStopBtn();
-  const add = $('#qAdd');
-  if (add) add.onclick = addToQueue;
-  const runBtn = $('#qRun');
-  if (runBtn) runBtn.onclick = runQueue;
-  const cl = $('#qClear');
-  if (cl) cl.onclick = () => {
-    if ((state.queue || []).some(it => it.running)) { qHint('有任务正在算——先点上面「■ 终止」'); return; }
-    state.queue = []; saveLocal(); renderQueue(); renderQueueResults();
-  };
-  renderQueue(); renderQueueResults();
+  mountEncPanel('#encPanel', 'single');
+  mountEncPanel('#cmpEncPanel', 'compare');
+  mountEncPanel('#upEncPanel', 'upgrade');
 }
-
 /* ---------- 截图导入：卡组 + 遗物 ---------- */
 const shot = { img: null, cards: [], relics: [], feats: null };
 

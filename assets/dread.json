@@ -1,0 +1,86 @@
+[
+ {
+  "dominion": "AEONGLASS",
+  "encounterId": "AEONGLASS_BOSS",
+  "name": "永世沙漏",
+  "desc": "在你的回合开始时，在你的抽牌堆顶加入1张凋萎。",
+  "exists": true
+ },
+ {
+  "dominion": "CEREMONIAL_BEAST",
+  "encounterId": "CEREMONIAL_BEAST_BOSS",
+  "name": "仪式兽",
+  "desc": "所有敌人获得1层仪式。",
+  "exists": true
+ },
+ {
+  "dominion": "INSATIABLE",
+  "encounterId": "THE_INSATIABLE_BOSS",
+  "name": "无厌沙虫",
+  "desc": "在你的回合结束时，根据当前回合数受到伤害。",
+  "exists": true
+ },
+ {
+  "dominion": "KAISER_CRAB",
+  "encounterId": "KAISER_CRAB_BOSS",
+  "name": "帝皇蟹",
+  "desc": "所有敌人获得7层覆甲。",
+  "exists": true
+ },
+ {
+  "dominion": "KIN",
+  "encounterId": "THE_KIN_BOSS",
+  "name": "同族小队",
+  "desc": "你在战斗开始时拥有2层虚弱和脆弱。",
+  "exists": true
+ },
+ {
+  "dominion": "KNOWLEDGE_DEMON",
+  "encounterId": "KNOWLEDGE_DEMON_BOSS",
+  "name": "知识恶魔",
+  "desc": "在战斗开始时，从2种支配灾祸中选择1种。",
+  "exists": true
+ },
+ {
+  "dominion": "LAGAVULIN_MATRIARCH",
+  "encounterId": "LAGAVULIN_MATRIARCH_BOSS",
+  "name": "乐加维林族母",
+  "desc": "在你的第一回合结束时，失去1点力量和敏捷。",
+  "exists": true
+ },
+ {
+  "dominion": "QUEEN",
+  "encounterId": "QUEEN_BOSS",
+  "name": "女王",
+  "desc": "在第2回合开始时，获得3层虚弱、易伤和脆弱。",
+  "exists": true
+ },
+ {
+  "dominion": "SOUL_FYSH",
+  "encounterId": "SOUL_FYSH_BOSS",
+  "name": "灵魂异鱼",
+  "desc": "在每场战斗开始时，在你的抽牌堆中洗入一张呼唤。",
+  "exists": true
+ },
+ {
+  "dominion": "TEST_SUBJECT",
+  "encounterId": "TEST_SUBJECT_BOSS",
+  "name": "实验体",
+  "desc": "所有敌人在战斗的第一回合获得3点力量。",
+  "exists": true
+ },
+ {
+  "dominion": "VANTOM",
+  "encounterId": "VANTOM_BOSS",
+  "name": "墨影幻灵",
+  "desc": "普通敌人获得1层滑溜。精英获得2层滑溜。",
+  "exists": true
+ },
+ {
+  "dominion": "WATERFALL_GIANT",
+  "encounterId": "WATERFALL_GIANT_BOSS",
+  "name": "瀑布巨兽",
+  "desc": "敌人死亡时会爆炸，造成伤害。",
+  "exists": true
+ }
+]

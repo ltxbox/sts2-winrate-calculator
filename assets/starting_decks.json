@@ -1,0 +1,124 @@
+{
+ "IRONCLAD": [
+  {
+   "cardId": "BASH",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "DEFEND_IRONCLAD",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "STRIKE_IRONCLAD",
+   "upgradeLevels": 0,
+   "count": 5
+  }
+ ],
+ "SILENT": [
+  {
+   "cardId": "DEFEND_SILENT",
+   "upgradeLevels": 0,
+   "count": 5
+  },
+  {
+   "cardId": "NEUTRALIZE",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "STRIKE_SILENT",
+   "upgradeLevels": 0,
+   "count": 5
+  },
+  {
+   "cardId": "SURVIVOR",
+   "upgradeLevels": 0,
+   "count": 1
+  }
+ ],
+ "DEFECT": [
+  {
+   "cardId": "DEFEND_DEFECT",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "DUALCAST",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "STRIKE_DEFECT",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "ZAP",
+   "upgradeLevels": 0,
+   "count": 1
+  }
+ ],
+ "NECROBINDER": [
+  {
+   "cardId": "BODYGUARD",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "DEFEND_NECROBINDER",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "STRIKE_NECROBINDER",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "UNLEASH",
+   "upgradeLevels": 0,
+   "count": 1
+  }
+ ],
+ "REGENT": [
+  {
+   "cardId": "DEFEND_REGENT",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "FALLING_STAR",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "STRIKE_REGENT",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "VENERATE",
+   "upgradeLevels": 0,
+   "count": 1
+  }
+ ],
+ "FOOL": [
+  {
+   "cardId": "DEFEND_FOOL",
+   "upgradeLevels": 0,
+   "count": 4
+  },
+  {
+   "cardId": "FOOLISH_SHOT",
+   "upgradeLevels": 0,
+   "count": 1
+  },
+  {
+   "cardId": "STRIKE_FOOL",
+   "upgradeLevels": 0,
+   "count": 5
+  }
+ ]
+}

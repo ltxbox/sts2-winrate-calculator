@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StS2 胜率测算 · OfflineSearchHarness</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">♠</span>
+    <div><div class="title">杀戮尖塔 2 · 胜率测算</div><div class="sub">只跑 OfflineSearchHarness，不做前端模拟</div></div>
+  </div>
+  <div class="config">
+    <label>角色<select id="character"></select></label>
+    <label>当前血量<input id="hp" type="number" min="1" max="999" value="37"></label>
+    <label>最大血量<input id="maxhp" type="number" min="1" max="999" value="66" title="切角色会自动填该角色的初始上限，也可以自己改"></label>
+    <label>飞升<input id="ascension" type="number" min="0" max="20" value="10"></label>
+    <label>模式<select id="gameMode" title="恐惧模式只有进阶 10，领域效果由「恐惧首领」决定"><option value="Standard">标准</option><option value="Dread">恐惧</option></select></label>
+    <label id="dreadWrap" style="display:none">恐惧首领<select id="dreadBoss"></select></label>
+    <label>样本数<input id="count" type="number" min="1" max="1000" value="100"></label>
+    <div class="quick" id="countQuick">
+      <button data-n="20">20</button><button data-n="50">50</button><button data-n="100">100</button><button data-n="200">200</button><button data-n="500">500</button><button data-n="1000">1000</button>
+    </div>
+    <label>种子前缀<input id="prefix" type="text" value="HISRUN"></label>
+    <label>药水<select id="potionPolicy"><option value="Disabled">不用药</option><option value="Smart">智能用药</option></select></label>
+  </div>
+  <div class="runbox">
+    <button id="run" class="primary">开始测算</button>
+    <button id="selftest" class="ghost" title="跑 1 局小样本，确认模拟器、游戏目录、模组都正常">自检</button>
+    <div class="progress"><div id="bar"></div></div>
+    <span id="progressText">就绪</span>
+  </div>
+</header>
+<div id="diagBanner" class="diag-banner" style="display:none"></div>
+
+<nav class="modes" id="modes">
+  <button data-mode="single" class="active">单场测算</button>
+  <button data-mode="compare">三卡对比</button>
+  <button data-mode="upgrade">三选一升级</button>
+  <button data-mode="rest">升级 vs 睡觉</button>
+</nav>
+
+<div class="relicbar">
+  <span class="bar-label">遗物</span>
+  <div id="relicList" class="chips"></div>
+  <button id="addRelic" class="ghost">+ 选遗物</button>
+</div>
+
+<div class="relicbar potionbar">
+  <span class="bar-label">药水</span>
+  <div id="potionList" class="chips"></div>
+  <button id="addPotion" class="ghost">+ 选药水</button>
+</div>
+
+<main class="cols" id="modeSingle">
+  <section class="panel deck-panel">
+    <div class="panel-head">
+      <h3>卡组 <span id="deckCount" class="muted"></span></h3>
+      <span id="refreshInfo" class="muted tiny"></span>
+      <select id="presetSel" class="preset-sel" title="卡组预设"><option value="">预设…</option></select>
+      <button id="presetSave" class="ghost small">存为预设</button>
+      <button id="presetDel" class="ghost small" disabled>删预设</button>
+      <button id="resetDeck" class="ghost small">初始卡组</button>
+      <button id="clearDeck" class="ghost small">清空</button>
+      <button id="shotImport" class="ghost small" title="从游戏截图识别卡组和遗物">截图导入</button>
+      <button id="textImport" class="ghost small" title="用一句话描述怎么改初始卡组，比如「绿护卫，白能量汲取，删一打」">文字导入</button>
+      <button id="exportSummary" class="ghost small" title="把当前卡组、升级、遗物、药水导出成一张结算图">导出结算图</button>
+      <button id="refresh" class="ghost small">刷新</button>
+    </div>
+    <div id="deckList" class="deck-list"></div>
+    <div class="panel-head pool-head">
+      <input id="cardSearch" type="search" placeholder="搜索卡牌（中文 / ID / 关键词）">
+      <select id="typeFilter">
+        <option value="">全部类型</option>
+        <option value="1">攻击</option><option value="2">技能</option><option value="3">能力</option>
+        <option value="4">状态</option><option value="5">诅咒</option><option value="6">特殊</option>
+      </select>
+    </div>
+    <div id="cardPool" class="card-grid"></div>
+  </section>
+
+  <section class="panel mid-panel">
+    <div class="panel-head"><h3>测算结果</h3><button id="csv" class="ghost small" disabled>导出 CSV</button></div>
+    <div id="resultHead" class="result-head">
+      <div class="big" id="winrate">—</div>
+      <div class="stat"><span id="progLabel">未开始</span></div>
+    </div>
+    <div id="resultStats" class="result-stats"></div>
+    <div id="singleAttr" class="attr-block"></div>
+    <div id="resultList" class="result-list"></div>
+  </section>
+
+  <section class="panel enc-panel">
+    <div class="panel-head"><h3>遭遇</h3><input id="encSearch" type="search" placeholder="搜索怪物"></div>
+    <div class="tabs" id="encTabs">
+      <button data-kind="boss" class="active">Boss</button>
+      <button data-kind="elite">精英</button>
+      <button data-kind="normal">普通</button>
+      <button data-kind="weak">弱怪</button>
+      <button data-kind="event">事件</button>
+    </div>
+    <div id="encList" class="enc-list"></div>
+  </section>
+</main>
+
+<main class="cols cols-compare hidden" id="modeCompare">
+  <section class="panel side-rail">
+    <div class="panel-head"><h3>候选卡（最多 3 张）</h3><button id="cmpClear" class="ghost small">清空</button></div>
+    <div id="cmpSlots" class="slots"></div>
+    <div class="muted tiny hint-line">点下面的牌加入空槽；勾「+」按升级态加入。卡组用「单场测算」那套。</div>
+    <div class="panel-head pool-head">
+      <input id="cmpSearch" type="search" placeholder="搜索卡牌（中文 / ID）">
+      <select id="cmpType">
+        <option value="">全部类型</option>
+        <option value="1">攻击</option><option value="2">技能</option><option value="3">能力</option>
+      </select>
+    </div>
+    <div id="cmpPool" class="card-grid"></div>
+    <div class="panel-head pool-head"><h3>当前状态</h3></div>
+    <div id="cmpState" class="side-state"></div>
+  </section>
+
+  <section class="panel mid-panel">
+    <div class="panel-head">
+      <h3>对比结果</h3>
+      <label class="inline">遭遇<select id="cmpEnc"></select></label>
+      <label class="inline">预算ms<input id="cmpBudget" type="number" value="8000" style="width:70px"></label>
+      <span id="cmpProgress" class="muted tiny"></span>
+      <button id="cmpRun" class="primary small push-right">开始对比</button>
+    </div>
+    <div id="cmpResult" class="cmp-result"><div class="empty">选三张卡，点「开始对比」</div></div>
+  </section>
+</main>
+
+<main class="cols cols-compare hidden" id="modeUpgrade">
+  <section class="panel side-rail">
+    <div class="panel-head"><h3>选三张要升级的牌</h3><button id="upClear" class="ghost small">清空</button></div>
+    <div id="upSlots" class="slots"></div>
+    <div class="muted tiny hint-line">从下面点三张（同一行只能选一次）；每个方案只升这一张、其余不动，和「不升级」同种子比。</div>
+    <div class="panel-head pool-head"><h3>当前卡组</h3><span id="upDeckCount" class="muted tiny"></span></div>
+    <div id="upDeck" class="up-deck"></div>
+  </section>
+
+  <section class="panel mid-panel">
+    <div class="panel-head">
+      <h3>升级对比</h3>
+      <label class="inline">遭遇<select id="upEnc"></select></label>
+      <label class="inline">预算ms<input id="upBudget" type="number" value="8000" style="width:70px"></label>
+      <span id="upProgress" class="muted tiny"></span>
+      <button id="upRun" class="primary small push-right">开始对比</button>
+    </div>
+    <div id="upResult" class="cmp-result"><div class="empty">在左边选三张牌，点「开始对比」</div></div>
+  </section>
+</main>
+
+<main class="cols cols-compare hidden" id="modeRest">
+  <section class="panel side-rail">
+    <div class="panel-head"><h3>升级哪一张 / 还是睡觉</h3></div>
+    <div class="stack">
+      <label>要升级的卡<select id="restCard"></select></label>
+      <label>遭遇<select id="restEnc"></select></label>
+      <label>回血比例 <input id="restPct" type="number" min="0" max="100" value="30" style="width:60px">%</label>
+      <label>回血基准
+        <select id="restBase">
+          <option value="max">按上限血量（游戏规则）</option>
+          <option value="current">按当前血量</option>
+        </select>
+      </label>
+      <label class="chk"><input id="restPillow" type="checkbox"> 有枕头（额外 +15）</label>
+      <label class="chk"><input id="restFurnace" type="checkbox"> 有石炉（+5 生命上限）</label>
+    </div>
+    <div class="muted tiny" id="restMath" style="margin:8px 10px"></div>
+    <div class="panel-head pool-head"><h3>当前状态</h3></div>
+    <div id="restState" class="side-state"></div>
+  </section>
+
+  <section class="panel mid-panel">
+    <div class="panel-head">
+      <h3>对比结果</h3>
+      <label class="inline">预算ms<input id="restBudget" type="number" value="8000" style="width:70px"></label>
+      <span id="restProgress" class="muted tiny"></span>
+      <button id="restRun" class="primary small push-right">开始对比</button>
+    </div>
+    <div id="restResult" class="cmp-result"><div class="empty">选好卡和遗物条件，点「开始对比」</div></div>
+  </section>
+</main>
+<dialog id="textDlg">
+  <div class="dlg-head">
+    <h3>文字导入卡组</h3>
+    <span class="muted tiny">默认在初始卡组上改</span>
+    <button class="ghost" id="textDlgClose">关闭</button>
+  </div>
+  <div class="text-body">
+    <textarea id="textInput" rows="5" placeholder="绿护卫，白能量汲取，删一打&#10;绿=升级、白=不升级、删N卡名=删掉 N 张、2绿打击=加两张升级打击"></textarea>
+    <label class="chk tiny"><input id="textBaseCur" type="checkbox"> 在当前卡组上改（不勾 = 在初始卡组上改）</label>
+    <div id="textPreview" class="text-preview"><div class="muted tiny">写一句，这里先给你看改成了什么样，再决定要不要用。</div></div>
+  </div>
+  <div class="dlg-foot">
+    <span id="textWarn" class="muted tiny"></span>
+    <button id="textApply" class="primary" disabled>用到卡组</button>
+  </div>
+</dialog>
+
+<dialog id="potionDlg">
+  <div class="dlg-head">
+    <h3>选药水</h3>
+    <span id="potionDlgCount" class="muted"></span>
+    <button class="ghost" id="potionDlgClose">关闭</button>
+  </div>
+  <div class="dlg-tools"><input id="potionSearch" type="search" placeholder="搜索药水"></div>
+  <div id="potionGrid" class="relic-grid"></div>
+</dialog>
+
+<dialog id="relicDlg">
+  <div class="dlg-head"><h3>选择遗物</h3><button class="ghost" id="relicDlgClose">关闭</button></div>
+  <div class="dlg-tools"><input id="relicSearch" type="search" placeholder="搜索遗物"><span id="relicDlgCount" class="muted"></span></div>
+  <div id="relicGrid" class="relic-grid"></div>
+</dialog>
+
+<dialog id="shotDlg">
+  <div class="dlg-head">
+    <h3>截图导入</h3>
+    <span id="shotInfo" class="muted tiny"></span>
+    <button class="ghost" id="shotClose">关闭</button>
+  </div>
+  <div class="shot-body">
+    <div id="shotDrop" class="shot-drop">
+      <div class="shot-drop-main">把游戏截图拖到这里</div>
+      <div class="muted tiny">或者 Ctrl+V 粘贴 · 支持「卡组浏览」和「结算/跑图记录」两种界面</div>
+      <label class="shot-pick">选择文件<input id="shotFile" type="file" accept="image/*"></label>
+    </div>
+    <img id="shotPreview" class="shot-preview" alt="" style="display:none">
+    <div id="shotCardList" class="shot-cards"></div>
+    <div id="shotRelicList" class="shot-relics"></div>
+  </div>
+  <div class="dlg-foot">
+    <span id="shotWarn" class="muted tiny"></span>
+    <button id="shotApply" class="primary" disabled>应用到卡组</button>
+  </div>
+</dialog>
+
+<div id="errBar" style="display:none">
+  <div class="msg"></div>
+  <div class="acts">
+    <button id="errCopy" class="ghost small">复制诊断信息</button>
+    <button id="errClose" class="ghost small">×</button>
+  </div>
+</div>
+<script src="/decklogic.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

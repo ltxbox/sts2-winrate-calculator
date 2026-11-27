@@ -1,0 +1,30 @@
+# ---- 不进仓库的东西 ----
+# 游戏图片素材（259MB，MegaCrit 版权，自己本地生成/不放）
+assets/cards/
+assets/relics/
+assets/ui/
+
+# 游戏本地化原文（从游戏 pck 解出来的，不转载）
+data/eng/
+data/zhs/
+
+# 模拟器二进制与第三方运行库（从 CombatSolver 自己构建，MIT，但二进制不入库）
+harness/
+solver/
+node/
+
+# 打包产物、跑局记录、日志、截图
+dist/
+pack/out/
+package/
+runs/
+logs/
+*.log
+_config.local.json
+
+# 调试截图（根目录那些下划线开头的 png）
+/_*.png
+/_chrome-*/
+
+node_modules/
+*.zip

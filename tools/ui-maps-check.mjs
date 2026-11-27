@@ -51,7 +51,7 @@ try {
       for (const k of ['weak','normal','elite','boss','event']) {
         document.querySelector('#encTabs button[data-kind="' + k + '"]').click();
         await new Promise(r => setTimeout(r, 120));
-        per[k] = document.querySelectorAll('#encList .enc-item').length;
+        per[k] = document.querySelectorAll('#encList .enc-item[data-id]').length;
       }
       counts[m] = per;
     }
@@ -59,12 +59,12 @@ try {
     await new Promise(r => setTimeout(r, 120));
     document.querySelector('#encTabs button[data-kind="boss"]').click();
     await new Promise(r => setTimeout(r, 120));
-    return { tabs, counts, bossTotal: document.querySelectorAll('#encList .enc-item').length,
+    return { tabs, counts, bossTotal: document.querySelectorAll('#encList .enc-item[data-id]').length,
              firstBoss: (document.querySelector('#encList .enc-item') || {}).textContent };
   })()`);
   ok(JSON.stringify(maps.tabs) === JSON.stringify(['全部', '密林', '暗巷', '巢穴', '荣耀', '事件']), '地图标签是 全部/密林/暗巷/巢穴/荣耀/事件', maps.tabs.join(' '));
   ok(maps.counts['密林'].boss === 3 && maps.counts['暗巷'].boss === 3 && maps.counts['巢穴'].boss === 3 && maps.counts['荣耀'].boss === 3, '四张地图各有 3 个 Boss', JSON.stringify(maps.counts));
-  ok(maps.counts['密林'].normal === 13 && maps.counts['密林'].weak === 5 && maps.counts['密林'].elite === 3, '密林里 普通13 / 弱怪5 / 精英3', JSON.stringify(maps.counts['密林']));
+  ok(maps.counts['密林'].normal === 13 && maps.counts['密林'].weak === 4 && maps.counts['密林'].elite === 3, '密林里 普通13 / 弱怪4 / 精英3（飞蝇菌子弱怪 2026-11 被游戏删除）', JSON.stringify(maps.counts['密林']));
   ok(maps.bossTotal === 12, '选「全部」+ Boss 时还是 12 个', String(maps.bossTotal));
 
   // ---- 选中那张牌每局打出（自选对比）----

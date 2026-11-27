@@ -202,8 +202,19 @@ function bindDeckSplit() {
   window.addEventListener('resize', () => { if (state.deckListH > 0) apply(state.deckListH); });
 }
 
+/* 一组怪每只存「默认卡组 + 每张候选卡」各一份压缩摘要（数据图分块用，别把整份 summary 塞进 localStorage） */
+function packSummary(s) {
+  s = s || {};
+  return {
+    runs: s.runs, wins: s.wins, winrate: s.winrate,
+    avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost, medianHpLost: s.medianHpLost,
+    avgTurns: s.avgTurns, playsPerRun: s.playsPerRun, winrateCI: s.winrateCI,
+    attribution: (s.attribution || []).slice(0, 10).map(a => ({ cardId: a.cardId, damage: a.damage, share: a.share })),
+    plays: (s.plays || []).map(p => ({ cardId: p.cardId, total: p.total, avg: p.avg, perPlay: p.perPlay })),
+  };
+}
 function qStore(q) {
-  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, est: it.est || null, estSummary: it.estSummary || null, cardPlays: it.cardPlays == null ? null : it.cardPlays, baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null }));
+  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, est: it.est || null, estSummary: it.estSummary || null, estBestLabel: it.estBestLabel || '', blocks: it.blocks || null, cardPlays: it.cardPlays == null ? null : it.cardPlays, baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null }));
 }
 function qRestore(list) {
   if (!Array.isArray(list)) return [];
@@ -212,6 +223,7 @@ function qRestore(list) {
     winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, status: '',
     est: it.est || null, estSummary: it.estSummary || null, cardPlays: it.cardPlays == null ? null : it.cardPlays,
     baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null,
+    estBestLabel: it.estBestLabel || '', blocks: it.blocks || null,
   }));
 }
 function saveLocal() {
@@ -2287,15 +2299,31 @@ async function maybeBuildEstimate(mode) {
     const items = q.filter(it => it.est && it.est.group === g);
     const allDone = items.length && items.every(it => it.done && it.estSummary);
     if (!allDone || items.some(it => it.report)) continue;
-    const rows = items.map(it => {
-      const s = it.estSummary || {};
-      return {
-        enc: it.enc, name: qName(it.enc), winrate: s.winrate,
-        avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
-        avgTurns: s.avgTurns, cardPlays: it.cardPlays == null ? null : it.cardPlays,
-        baseWinrate: it.baseWinrate == null ? null : it.baseWinrate,
-      };
-    });
+    /* 分块：默认卡组一块，每张候选卡各一块；块内每只怪一行（带它自己的伤害归因） */
+    const keyList = [];
+    for (const it of items) for (const b of (it.blocks || [])) {
+      if (!b || !b.key || keyList.some(k => k.key === b.key)) continue;
+      keyList.push({ key: b.key, title: b.title || b.key, note: b.note || '', cardId: b.cardId || null });
+    }
+    if (!keyList.length) keyList.push({ key: 'base', title: '默认卡组', note: '', cardId: null });
+    const blocks = keyList.map(k => ({
+      key: k.key, title: k.title, note: k.note, cardId: k.cardId,
+      rows: items.map(it => {
+        const blk = (it.blocks || []).find(b => b && b.key === k.key);
+        const s = (blk && blk.summary) || it.estSummary || {};
+        const cp = k.cardId ? playsOf(s, k.cardId) : null;
+        return {
+          enc: it.enc, name: qName(it.enc), winrate: s.winrate,
+          avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
+          medianHpLost: s.medianHpLost, avgTurns: s.avgTurns, runs: s.runs, wins: s.wins,
+          playsPerRun: s.playsPerRun == null ? null : s.playsPerRun,
+          cardPlays: k.cardId ? (cp ? cp.avg : 0) : null,
+          attribution: s.attribution || [],
+        };
+      }),
+    }));
+    const cardNamesMap = {};
+    if (state.cardsById) state.cardsById.forEach((c, id) => { cardNamesMap[id] = c.name; });
     const it0 = items[0];
     const cands = mode === 'compare'
       ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
@@ -2306,7 +2334,7 @@ async function maybeBuildEstimate(mode) {
       title: `单卡战损预估 · ${g}`, label: g, mode,
       map: (it0.est && it0.est.map) || state.encMap,
       kind: GROUP_KINDS[(it0.est && it0.est.kind)] || '',
-      candidate: cands, count: state.count, rows,
+      candidate: cands, count: state.count, blocks, cardNames: cardNamesMap,
     });
     items[items.length - 1].report = report;
     saveLocal();
@@ -2377,12 +2405,33 @@ async function runQueue(mode) {
       }
       // 组里的一只怪：对比/升级模式下要报「用了这张牌」那一路的数，不是不放这张牌的基线
       if (it.est) {
-        const cand = (mode !== 'single' && job.variants && job.variants.length > 1) ? job.variants[1] : null;
-        it.estSummary = cand ? (cand.summary || {}) : s;
-        it.baseWinrate = cand ? s.winrate : null;
-        const cid = cand && cand.card && cand.card.cardId;
-        const cp = cid ? playsOf(it.estSummary, cid) : null;
-        it.cardPlays = cp ? cp.avg : null;
+        /* 每一路（默认卡组 + 每张候选卡）各存一份压缩摘要：数据图按块分开看，别混成一个数 */
+        const vs = (job.variants || []);
+        const baseV = vs[0] || { summary: s };
+        const baseSum = baseV.summary || s || {};
+        it.blocks = [{ key: 'base', title: '默认卡组', note: mode === 'single' ? '' : '不放这张牌', summary: packSummary(baseSum) }];
+        const seen = new Set();
+        for (const v of vs.slice(1)) {
+          const cid = v && v.card && v.card.cardId;
+          if (!cid || seen.has(cid)) continue;
+          seen.add(cid);
+          it.blocks.push({ key: 'card:' + cid, title: cardName(cid), note: '换上这张牌', cardId: cid, summary: packSummary(v.summary || {}) });
+        }
+        const bestBlock = it.blocks.slice(1).slice().sort((a, b) =>
+          ((b.summary.winrate || 0) - (a.summary.winrate || 0)) ||
+          ((a.summary.avgHpLost == null ? 999 : a.summary.avgHpLost) - (b.summary.avgHpLost == null ? 999 : b.summary.avgHpLost)))[0] || null;
+        if (bestBlock) {
+          it.estSummary = bestBlock.summary;
+          it.baseWinrate = baseSum.winrate == null ? null : baseSum.winrate;
+          const cp = playsOf(bestBlock.summary, bestBlock.cardId);
+          it.cardPlays = cp ? cp.avg : 0;
+          it.estBestLabel = bestBlock.title;
+        } else {
+          it.estSummary = baseSum;
+          it.baseWinrate = null;
+          it.cardPlays = null;
+          it.estBestLabel = '';
+        }
         await maybeBuildEstimate(mode);
       }
       renderQueue(mode); renderQueueResults(mode);
@@ -2410,7 +2459,7 @@ function renderQueueResults(mode) {
     const s = (it.est && it.estSummary) ? it.estSummary : it.summary;
     const rep = it.report ? ` <a class="q-report-link" href="${it.report.url}" target="_blank" rel="noreferrer noopener" title="打开这组怪的战损数据图">数据图 ↗</a>` : '';
     const common = `<td>${encLink(it.enc, qName(it.enc))}${rep}</td>
-      <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>`;
+      <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}${mode !== 'single' && it.estBestLabel ? `<span class="muted tiny"> ${esc(it.estBestLabel)}</span>` : ''}</td>`;
     if (mode === 'single') {
       return `<tr>${common}
         <td class="num">${hpRangeText(s)}</td>

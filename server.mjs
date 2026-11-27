@@ -605,76 +605,212 @@ fs.mkdirSync(EST_DIR, { recursive: true });
 
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function estimateHtml(d) {
-  const rows = (d.rows || []).filter(r => r && r.name);
-  const losses = rows.map(r => Number(r.avgHpLost) || 0);
-  const maxLoss = Math.max(1, ...losses);
-  const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
-  const worst = rows.slice().sort((a, b) => (Number(b.avgHpLost) || 0) - (Number(a.avgHpLost) || 0))[0];
-  const best = rows.slice().sort((a, b) => (Number(a.avgHpLost) || 0) - (Number(b.avgHpLost) || 0))[0];
-  const avgWr = rows.length ? rows.reduce((a, b) => a + (Number(b.winrate) || 0), 0) / rows.length : 0;
-  const barH = 26, gap = 10, labelW = 210, chartW = 900;
-  const bars = rows.slice().sort((a, b) => (Number(b.avgHpLost) || 0) - (Number(a.avgHpLost) || 0)).map((r, i) => {
-    const v = Number(r.avgHpLost) || 0;
-    const w = Math.max(2, Math.round((v / maxLoss) * (chartW - labelW - 90)));
-    const wr = Number(r.winrate) || 0;
-    const color = wr >= 0.99 ? '#3fa96a' : wr >= 0.7 ? '#c8a13a' : wr > 0 ? '#d1823a' : '#c65a5a';
-    const y = i * (barH + gap);
-    return `<g transform="translate(0,${y})">
-      <text x="0" y="17" fill="#cfd8e8" font-size="13">${escHtml(r.name)}</text>
-      <rect x="${labelW}" y="4" width="${w}" height="${barH - 8}" rx="4" fill="${color}" opacity="0.85"/>
-      <text x="${labelW + w + 8}" y="17" fill="#e6edf7" font-size="12">${v.toFixed(1)}</text>
-      <text x="${chartW - 70}" y="17" fill="${wr >= 0.999 ? '#7fd6a0' : '#e0b070'}" font-size="12">${(wr * 100).toFixed(0)}%</text>
-    </g>`;
+const ATTR_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#e67e22', '#1abc9c', '#95a5a6', '#34495e', '#d35400'];
+const cardLabel = (id, names) => (id === '__other__' ? '其他来源' : ((names && names[id]) || id));
+
+/* 环形饼图：伤害归因（跟「单场测算」里那张一样的画法） */
+function pieSvg(items, size) {
+  const total = items.reduce((s, i) => s + i.value, 0);
+  const R = size / 2, r = R * 0.56, cx = R, cy = R;
+  const open = `<svg class="pie" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">`;
+  if (!total) return `${open}<circle cx="${cx}" cy="${cy}" r="${(R + r) / 2}" fill="none" stroke="#2a2f3a" stroke-width="${R - r}"/></svg>`;
+  if (items.length === 1) return `${open}<circle cx="${cx}" cy="${cy}" r="${(R + r) / 2}" fill="none" stroke="${ATTR_COLORS[0]}" stroke-width="${R - r}"/></svg>`;
+  let a0 = -Math.PI / 2;
+  const paths = items.map((it, i) => {
+    const frac = it.value / total;
+    const a1 = a0 + frac * Math.PI * 2;
+    const large = frac > 0.5 ? 1 : 0;
+    const pt = (a, rr) => [(cx + Math.cos(a) * rr).toFixed(2), (cy + Math.sin(a) * rr).toFixed(2)];
+    const [x0, y0] = pt(a0, R), [x1, y1] = pt(a1, R), [x2, y2] = pt(a1, r), [x3, y3] = pt(a0, r);
+    const dd = `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r},${r} 0 ${large} 0 ${x3},${y3} Z`;
+    a0 = a1;
+    return `<path d="${dd}" fill="${ATTR_COLORS[i % ATTR_COLORS.length]}"><title>${escHtml(it.label)} ${Math.round(it.value)}</title></path>`;
   }).join('');
-  const chartH = Math.max(40, rows.length * (barH + gap));
-  const table = rows.map(r => {
-    const wr = Number(r.winrate) || 0;
-    const lost = wr < 0.999;
-    const lo = r.minHpLost == null ? '' : r.minHpLost;
-    const hi = r.maxHpLost == null ? '' : r.maxHpLost;
-    const range = lo === hi || hi === '' ? String(lo) : `${lo}–${hi}`;
-    const lossTxt = r.avgHpLost == null ? '—' : Number(r.avgHpLost).toFixed(1);
-    const cardCol = d.mode && d.mode !== 'single';
-    return `<tr>
-      <td>${escHtml(r.name)}${lost ? ' <span class="lost">打不过</span>' : ''}</td>
+  return `${open}${paths}</svg>`;
+}
+
+function attrBlockHtml(attr, title, opts) {
+  const o = opts || {};
+  const list = (attr || []).filter(a => a && a.cardId && Number(a.damage) >= 1).slice(0, o.max || 9);
+  if (!list.length) return '';
+  const pie = pieSvg(list.map(a => ({ label: cardLabel(a.cardId, o.names), value: Number(a.damage) })), o.size || 132);
+  const legend = `<div class="legend">${list.map((a, i) => `<div class="lg"><i style="background:${ATTR_COLORS[i % ATTR_COLORS.length]}"></i><span>${escHtml(cardLabel(a.cardId, o.names))}</span><b>${Math.round(Number(a.damage))}</b><span class="muted">${((Number(a.share) || 0) * 100).toFixed(0)}%</span></div>`).join('')}</div>`;
+  return `<div class="attr-card">
+    <div class="attr-title">${escHtml(title)}</div>
+    <div class="attr-body">${pie}${legend}</div>
+  </div>`;
+}
+
+function estimateHtml(d) {
+  const when = new Date().toLocaleString('zh-CN');
+  const num = v => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+  const src = (Array.isArray(d.blocks) && d.blocks.length) ? d.blocks : [{ key: 'base', title: '默认卡组', rows: d.rows || [] }];
+  const blocks = src.map((b, i) => ({
+    key: String((b && b.key) || ('b' + i)),
+    title: (b && b.title) || (i ? '候选卡' : '默认卡组'),
+    note: (b && b.note) || '',
+    cardId: (b && b.cardId) || null,
+    rows: ((b && b.rows) || []).filter(r => r && r.name),
+  })).filter(b => b.rows.length);
+  if (!blocks.length) blocks.push({ key: 'base', title: '默认卡组', note: '', rows: [] });
+  const names = d.cardNames || {};
+  const baseWr = new Map();
+  for (const r of blocks[0].rows) baseWr.set(r.enc || r.name, num(r.winrate) || 0);
+
+  const panels = blocks.map((b, bi) => {
+    const rows = b.rows;
+    const sorted = rows.slice().sort((a, c) => (num(c.avgHpLost) || 0) - (num(a.avgHpLost) || 0));
+    const losses = rows.map(r => num(r.avgHpLost) || 0);
+    const maxLoss = Math.max(1, ...losses);
+    const avgLoss = losses.length ? losses.reduce((a, c) => a + c, 0) / losses.length : 0;
+    const worst = sorted[0];
+    const best = sorted[sorted.length - 1];
+    const avgWr = rows.length ? rows.reduce((a, c) => a + (num(c.winrate) || 0), 0) / rows.length : 0;
+    const isBase = bi === 0;
+    const isCard = !isBase && b.key.indexOf('card:') === 0;
+    const cols = isCard ? 6 : 5;
+
+    // 整块的伤害归因：每只怪的归因加起来
+    const sum = Object.create(null);
+    let total = 0;
+    for (const r of rows) for (const a of (r.attribution || [])) { if (!a || !a.cardId) continue; sum[a.cardId] = (sum[a.cardId] || 0) + (num(a.damage) || 0); }
+    for (const v of Object.values(sum)) total += v;
+    const attrAll = Object.entries(sum)
+      .map(([cardId, damage]) => ({ cardId, damage, share: total ? damage / total : 0 }))
+      .sort((a, c) => c.damage - a.damage);
+
+    const bars = sorted.map(r => {
+      const v = num(r.avgHpLost) || 0;
+      const wr = num(r.winrate) || 0;
+      const pct = Math.max(1.5, (v / maxLoss) * 100);
+      const color = wr >= 0.99 ? '#3fa96a' : wr >= 0.7 ? '#c8a13a' : wr > 0 ? '#d1823a' : '#c65a5a';
+      const lostTag = wr < 0.999 ? ' <span class="lost">打不过</span>' : '';
+      return `<div class="brow"><span class="bname" title="${escHtml(r.name)}">${escHtml(r.name)}${lostTag}</span>
+      <span class="btrack"><i style="width:${pct.toFixed(1)}%;background:${color}"></i></span>
+      <b class="bval">${v.toFixed(1)}</b>
+      <b class="bwr" style="color:${wr >= 0.999 ? '#7fd6a0' : wr > 0 ? '#e0b070' : '#d76a6a'}">${(wr * 100).toFixed(0)}%</b></div>`;
+    }).join('');
+
+    const trs = sorted.map(r => {
+      const wr = num(r.winrate) || 0;
+      const lost = wr < 0.999;
+      const lo = num(r.minHpLost), hi = num(r.maxHpLost);
+      const range = (lo == null || hi == null) ? '' : (lo === hi ? String(lo) : `${lo}–${hi}`);
+      const lossTxt = num(r.avgHpLost) == null ? '—' : Number(r.avgHpLost).toFixed(1);
+      const baseOf = r.baseWinrate != null ? num(r.baseWinrate) : (isCard ? (baseWr.has(r.enc || r.name) ? baseWr.get(r.enc || r.name) : null) : null);
+      const playsTxt = isCard
+        ? (r.cardPlays == null ? '—' : Number(r.cardPlays).toFixed(1))
+        : (r.playsPerRun == null ? '—' : Number(r.playsPerRun).toFixed(1));
+      const attr = (r.attribution || []).filter(a => a && a.cardId && num(a.damage) >= 1);
+      const detail = `<tr class="mdetail"><td colspan="${cols}"><div class="dd">
+        <div class="dd-stats">
+          <span>胜率 <b>${(wr * 100).toFixed(0)}%</b>${r.runs != null ? `<span class="muted"> · ${r.runs} 局</span>` : ''}</span>
+          <span>战损 <b>${lossTxt}</b>${range ? `<span class="muted">（${escHtml(range)}）</span>` : ''}${r.medianHpLost != null ? `<span class="muted"> · 中位数 ${Number(r.medianHpLost).toFixed(1)}</span>` : ''}</span>
+          <span>回合 <b>${r.avgTurns == null ? '—' : escHtml(r.avgTurns)}</b></span>
+          <span>${isCard ? '这张牌每局' : '每局打出'} <b>${playsTxt}</b></span>
+        </div>
+        ${attr.length ? attrBlockHtml(attr, '这只怪的伤害归因（打出的伤害各来自哪张牌）', { size: 116, max: 8, names }) : '<div class="muted">这只怪没记下伤害归因</div>'}
+      </div></td></tr>`;
+      return `<tr class="mrow"><td><span class="caret">▸</span>${escHtml(r.name)}${lost ? ' <span class="lost">打不过</span>' : ''}</td>
       <td class="num">${lossTxt}<span class="muted">${range ? '（' + escHtml(range) + '）' : ''}</span></td>
       <td class="num" style="color:${wr >= 0.999 ? '#7fd6a0' : wr > 0 ? '#e0b070' : '#d76a6a'}">${(wr * 100).toFixed(0)}%</td>
-      ${cardCol ? `<td class="num muted">${r.baseWinrate == null ? '—' : (Number(r.baseWinrate) * 100).toFixed(0) + '%'}</td>` : ''}
-      <td class="num">${r.avgTurns == null ? '—' : r.avgTurns}</td>
-      ${cardCol ? `<td class="num">${r.cardPlays == null ? '—' : Number(r.cardPlays).toFixed(1)}</td>` : ''}
-    </tr>`;
+      ${isCard ? `<td class="num muted">${baseOf == null ? '—' : (baseOf * 100).toFixed(0) + '%'}</td>` : ''}
+      <td class="num">${r.avgTurns == null ? '—' : escHtml(r.avgTurns)}</td>
+      <td class="num">${playsTxt}</td></tr>${detail}`;
+    }).join('');
+
+    return `<section class="panel${bi === 0 ? ' show' : ''}" data-k="${escHtml(b.key)}">
+  <div class="panel-head">${escHtml(b.title)}${b.note ? ` <span class="muted">· ${escHtml(b.note)}</span>` : ''}</div>
+  <div class="cards">
+    <div class="card"><span>平均战损</span><b>${avgLoss.toFixed(1)}</b></div>
+    <div class="card"><span>最狠的一只</span><b class="sm">${escHtml(worst ? worst.name : '—')}</b><span>${worst ? (num(worst.avgHpLost) || 0).toFixed(1) : ''}</span></div>
+    <div class="card"><span>最轻的一只</span><b class="sm">${escHtml(best ? best.name : '—')}</b><span>${best ? (num(best.avgHpLost) || 0).toFixed(1) : ''}</span></div>
+    <div class="card"><span>平均胜率</span><b>${(avgWr * 100).toFixed(0)}%</b></div>
+    <div class="card"><span>怪物数</span><b>${rows.length}</b></div>
+  </div>
+  <div class="bars">
+    <div class="bar-head"><span>怪物</span><span></span><span class="num">平均战损</span><span class="num">胜率</span></div>
+    ${bars}
+  </div>
+  ${attrAll.length ? attrBlockHtml(attrAll, '伤害归因 · 这一块所有怪物合计（横条＝战损，饼图＝伤害来自哪张牌）', { size: 150, max: 9, names }) : ''}
+  <table><thead><tr><th>怪物</th><th class="num">平均战损（区间）</th>
+    <th class="num">${isBase ? '胜率' : '胜率（用这张后）'}</th>${isCard ? '<th class="num">基线胜率</th>' : ''}
+    <th class="num">回合</th><th class="num">${isCard ? '这张牌每局' : '每局打出'}</th></tr></thead>
+  <tbody>${trs}</tbody></table>
+  <div class="foot">点任意一行展开：这只怪自己的战损、回合、以及它的伤害归因饼图。</div>
+</section>`;
   }).join('');
-  const when = new Date().toLocaleString('zh-CN');
+
+  const tabs = blocks.length > 1
+    ? `<div class="tabs">${blocks.map((b, i) => `<button class="tab${i === 0 ? ' active' : ''}" data-k="${escHtml(b.key)}">${escHtml(b.title)}</button>`).join('')}</div>`
+    : '';
+
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>${escHtml(d.title || '单卡战损预估')}</title>
 <style>
- body{margin:0;padding:28px 32px 40px;background:#14171d;color:#e6edf7;font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif}
- h1{font-size:20px;margin:0 0 4px} .sub{color:#93a1b5;font-size:12.5px;margin-bottom:18px}
+ body{margin:0;padding:26px 32px 48px;background:#14171d;color:#e6edf7;font:14px/1.6 "Microsoft YaHei",system-ui,-apple-system,sans-serif}
+ h1{font-size:20px;margin:0 0 4px}
+ .sub{color:#93a1b5;font-size:12.5px;margin-bottom:16px}
+ .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}
+ .tab{padding:7px 16px;border:1px solid #2a3140;border-radius:8px;background:#1a1f27;color:#a8b6ca;cursor:pointer;font-size:13.5px;font-family:inherit}
+ .tab:hover{background:#222835;color:#e6edf7}
+ .tab.active{background:#2b5fa8;border-color:#3b82f6;color:#fff}
+ .panel{display:none} .panel.show{display:block}
+ .panel-head{color:#9fb0c6;font-size:12.5px;margin:0 0 10px}
  .cards{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 20px}
  .card{background:#1d222b;border:1px solid #2a3140;border-radius:10px;padding:10px 16px;min-width:150px}
- .card b{display:block;font-size:20px;margin-top:2px} .card span{color:#8d9bb0;font-size:12px}
- table{border-collapse:collapse;width:100%;margin-top:18px;font-size:13px}
- th,td{border-bottom:1px solid #262d39;padding:6px 8px;text-align:left} th{color:#96a4b8;font-weight:500}
- td.num{text-align:right;font-variant-numeric:tabular-nums} .muted{color:#77849a;font-size:11.5px} .lost{color:#d76a6a;font-size:11px;border:1px solid #6b3a3a;border-radius:4px;padding:0 4px}
- .foot{margin-top:16px;color:#6f7c90;font-size:11.5px}
+ .card span{color:#8d9bb0;font-size:12px}
+ .card b{display:block;font-size:20px;margin-top:2px}
+ .card b.sm{font-size:15px;line-height:1.55}
+ .bars{margin:0 0 20px}
+ .bar-head,.brow{display:grid;grid-template-columns:240px 1fr 70px 70px;align-items:center;gap:10px}
+ .bar-head{color:#96a4b8;font-size:12px;padding:0 0 6px}
+ .brow{padding:3px 0}
+ .bname{color:#cfd8e8;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .btrack{background:#1b2029;border-radius:5px;height:18px;overflow:hidden}
+ .btrack i{display:block;height:100%;border-radius:5px;opacity:.9}
+ .bval,.bwr{font-size:12.5px;font-weight:400;font-variant-numeric:tabular-nums;text-align:right}
+ .attr-card{background:#1d222b;border:1px solid #2a3140;border-radius:10px;padding:12px 16px;margin:0 0 18px;display:inline-block;max-width:100%}
+ .attr-title{color:#9fb0c6;font-size:12.5px;margin-bottom:8px}
+ .attr-body{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+ .legend{display:flex;flex-direction:column;gap:4px;font-size:12.5px;min-width:190px}
+ .lg{display:grid;grid-template-columns:10px 1fr auto auto;gap:8px;align-items:center}
+ .lg i{width:10px;height:10px;border-radius:2px}
+ .lg b{font-weight:500;font-variant-numeric:tabular-nums}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border-bottom:1px solid #262d39;padding:7px 8px;text-align:left}
+ th{color:#96a4b8;font-weight:500;white-space:nowrap}
+ th.num,td.num,.num{text-align:right;font-variant-numeric:tabular-nums}
+ tbody tr.mrow{cursor:pointer}
+ tbody tr.mrow:hover{background:#1a1f27}
+ .caret{display:inline-block;width:14px;color:#7f8ea5;transition:transform .15s}
+ tr.mrow.open .caret{transform:rotate(90deg)}
+ tr.mdetail{display:none}
+ tr.mdetail.show{display:table-row}
+ tr.mdetail td{background:#171c24;padding:0;border-bottom:1px solid #262d39}
+ .dd{padding:12px 14px}
+ .dd-stats{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:#a8b6ca;margin-bottom:10px}
+ .muted{color:#77849a;font-size:11.5px}
+ .lost{color:#d76a6a;font-size:11px;border:1px solid #6b3a3a;border-radius:4px;padding:0 4px}
+ .foot{margin-top:14px;color:#6f7c90;font-size:11.5px;line-height:1.8}
 </style></head><body>
 <h1>${escHtml(d.title || '单卡战损预估')}</h1>
 <div class="sub">${escHtml([d.map, d.kind, d.candidate ? '候选卡：' + d.candidate : '', (d.count || 1) + ' 场/只', when].filter(Boolean).join(' · '))}</div>
-<div class="cards">
-  <div class="card"><span>平均战损</span><b>${avgLoss.toFixed(1)}</b></div>
-  <div class="card"><span>最狠的一只</span><b>${escHtml(worst ? worst.name : '—')}</b><span>${worst ? (Number(worst.avgHpLost) || 0).toFixed(1) : ''}</span></div>
-  <div class="card"><span>最轻的一只</span><b>${escHtml(best ? best.name : '—')}</b><span>${best ? (Number(best.avgHpLost) || 0).toFixed(1) : ''}</span></div>
-  <div class="card"><span>平均胜率</span><b>${(avgWr * 100).toFixed(0)}%</b></div>
-  <div class="card"><span>怪物数</span><b>${rows.length}</b></div>
-</div>
-<svg width="${chartW}" height="${chartH + 24}" viewBox="0 0 ${chartW} ${chartH + 24}" xmlns="http://www.w3.org/2000/svg">
-  <text x="0" y="${chartH + 20}" fill="#77849a" font-size="11">横条＝平均战损（掉血），右边数字＝胜率；绿色=全胜，黄色=常胜，红色=打不过</text>
-  ${bars}
-</svg>
-<table><thead><tr><th>怪物</th><th>平均战损（区间）</th><th>胜率（用这张后）</th>${d.mode && d.mode !== 'single' ? '<th>基线胜率</th>' : ''}<th>回合</th>${d.mode && d.mode !== 'single' ? '<th>这张牌每局</th>' : ''}</tr></thead>
-<tbody>${table}</tbody></table>
-<div class="foot">每只怪按上方「样本数」跑 ${d.count || 1} 场；战损＝这些场次平均掉的血，「打不过」是没打过的那只（不算战损）。数据由包内 OfflineSearchHarness 现算。</div>
+${tabs}
+${panels}
+<div class="foot">每只怪按上方「样本数」跑 ${d.count || 1} 场；战损＝这些场次平均掉的血，「打不过」是没打过的那只（不算战损）。饼图＝打出的伤害各来自哪张牌。数据由包内 OfflineSearchHarness 现算。</div>
+<script>
+document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
+  t.classList.add('active');
+  var k=t.getAttribute('data-k');
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('show',p.getAttribute('data-k')===k);});
+});});
+document.querySelectorAll('tr.mrow').forEach(function(tr){tr.addEventListener('click',function(){
+  var d=tr.nextElementSibling; if(!d||!d.classList.contains('mdetail')) return;
+  var open=d.classList.toggle('show'); tr.classList.toggle('open',open);
+});});
+</script>
 </body></html>`;
 }
 
@@ -1190,7 +1326,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/estimate') {
       const body = await readBody(req);
       const rows = Array.isArray(body.rows) ? body.rows : [];
-      if (!rows.length) return send(res, 400, { error: '没有可写的数据' });
+      const blocks = Array.isArray(body.blocks) ? body.blocks.filter(b => b && Array.isArray(b.rows) && b.rows.length) : [];
+      if (!blocks.length && !rows.length) return send(res, 400, { error: '没有可写的数据' });
+      if (!blocks.length) body.blocks = [{ key: 'base', title: '默认卡组', rows }];
       return send(res, 200, saveEstimate(body));
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/estimate/')) {

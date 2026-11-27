@@ -45,10 +45,12 @@ try {
     return [...document.querySelectorAll('#encList .enc-item.group')].map(x => x.textContent.trim().replace(/\\s+/g, ' '));
   })()`);
   ok(groups.length === 4, '密林里有四个「全部…」压缩行', groups.join(' | '));
-  ok(/全部弱怪.*5 只/.test(groups[0]) && /全部普通怪.*13 只/.test(groups[1]) && /全部精英.*3 只/.test(groups[2]) && /全部Boss.*3 只/.test(groups[3]), '四行各自带着数量', groups.join(' | '));
+  ok(/全部弱怪.*4 只/.test(groups[0]) && /全部普通怪.*13 只/.test(groups[1]) && /全部精英.*3 只/.test(groups[2]) && /全部Boss.*3 只/.test(groups[3]), '四行各自带着数量', groups.join(' | '));
 
   // 多选两组 → 队列里两行
   const multi = await ev(`(async () => {
+    document.querySelector('#qClear').click();
+    await new Promise(r => setTimeout(r, 200));
     state.encGroups = []; renderEncLists();
     await new Promise(r => setTimeout(r, 200));
     document.querySelectorAll('#encList .enc-item.group')[0].click();
@@ -61,7 +63,7 @@ try {
     return { active, items: [...document.querySelectorAll('#qList .q-item')].map(x => x.textContent.trim().replace(/\\s+/g, ' ')) };
   })()`);
   ok(multi.active === 2, '「全部弱怪」和「全部普通怪」能同时选', `${multi.active} 组`);
-  ok(multi.items.length === 18 && /小啃兽/.test(multi.items[0]) && /全部弱怪/.test(multi.items[0]) && /全部普通怪/.test(multi.items[17]), '两组=5+13 只，每只各排一行', `${multi.items.length} 行：${multi.items.slice(0, 2).join(' | ')} … ${multi.items[multi.items.length - 1]}`);
+  ok(multi.items.length === 17 && /小啃兽/.test(multi.items[0]) && /全部弱怪/.test(multi.items[0]) && /全部普通怪/.test(multi.items[16]), '两组=4+13 只，每只各排一行', `${multi.items.length} 行：${multi.items.slice(0, 2).join(' | ')} … ${multi.items[multi.items.length - 1]}`);
 
   // 只留弱怪那组，点「开始测算」→ 该组自动跑（测试里样本数设 1，省时间）
   const run = await ev(`(async () => {
@@ -88,18 +90,41 @@ try {
     };
   })()`);
   ok(run.href && /^\/api\/estimate\//.test(run.href), '跑完给了数据图链接', String(run.href));
-  ok(run.rows.length === 5, '排队表里 5 只怪各一行', `${run.rows.length} 行：${run.rows.join(' / ').slice(0, 160)}`);
+  ok(run.rows.length === 4, '排队表里 4 只怪各一行', `${run.rows.length} 行：${run.rows.join(' / ').slice(0, 160)}`);
 
   // 数据图文件本身：能打开、里面有每只怪的名字和战损
   const repUrl = new URL(run.href, BASE).toString();
   const html = await (await fetch(repUrl)).text();
-  const names = ['小啃兽', '史莱姆', '毛绒伏地虫', '缩小甲虫', '飞蝇菌子'];
+  const names = ['小啃兽', '史莱姆', '毛绒伏地虫', '缩小甲虫'];
   ok(html.includes('单卡战损预估') && html.includes('<svg'), '数据图是自带的 HTML+SVG，不依赖外部文件', `${(html.length / 1024).toFixed(0)}KB`);
   ok(/平均战损/.test(html) && /胜率/.test(html), '数据图里有摘要和表头', '');
   ok(names.filter(n => html.includes(n)).length >= 4, '数据图列出每只怪', `${names.filter(n => html.includes(n)).length}/${names.length} 只命中`);
 
-  const shot = await send('Page.captureScreenshot', { format: 'png' });
-  fs.writeFileSync(SHOT, Buffer.from(shot.result.data, 'base64'));
+  // 两卡对比那种数据图：默认卡组 / 每张候选卡各成一块（标签切换）+ 伤害归因饼图 + 每只怪能点开
+  const made = await fetch(new URL('/api/estimate', BASE), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: '分块测试', map: '暗巷', kind: '全部弱怪', count: 3,
+      blocks: [
+        { key: 'base', title: '默认卡组', note: '不放这张牌', rows: [
+          { enc: 'A', name: '怪甲', winrate: 1, avgHpLost: 6, minHpLost: 0, maxHpLost: 11, medianHpLost: 5, avgTurns: 4.7, runs: 20, attribution: [{ cardId: 'STRIKE', damage: 30, share: 0.6 }, { cardId: 'DEFEND', damage: 20, share: 0.4 }] },
+          { enc: 'B', name: '怪乙', winrate: 0.9, avgHpLost: 3, minHpLost: 0, maxHpLost: 7, avgTurns: 3.9, runs: 20, attribution: [{ cardId: 'STRIKE', damage: 20, share: 1 }] },
+        ] },
+        { key: 'card:PROPHESIZE', title: '预言', note: '换上这张牌', cardId: 'PROPHESIZE', rows: [
+          { enc: 'A', name: '怪甲', winrate: 0.95, avgHpLost: 5, minHpLost: 0, maxHpLost: 9, avgTurns: 4.5, runs: 20, cardPlays: 0.5, attribution: [{ cardId: 'PROPHESIZE', damage: 15, share: 0.5 }, { cardId: 'STRIKE', damage: 15, share: 0.5 }] },
+          { enc: 'B', name: '怪乙', winrate: 1, avgHpLost: 2, minHpLost: 0, maxHpLost: 5, avgTurns: 3.5, runs: 20, cardPlays: 0.4, attribution: [{ cardId: 'PROPHESIZE', damage: 10, share: 1 }] },
+        ] },
+      ],
+      cardNames: { STRIKE: '打击', DEFEND: '防御', PROPHESIZE: '预言' },
+    }),
+  });
+  const madeJson = await made.json();
+  const bh = made.ok ? await (await fetch(new URL(madeJson.url, BASE))).text() : '';
+  ok(made.ok && (bh.match(/class="tab(?![a-z])/g) || []).length === 2, '两块：默认卡组 + 候选卡各一个标签', `${(bh.match(/class="tab(?![a-z])/g) || []).length} 个`);
+  ok(/基线胜率/.test(bh) && (bh.match(/class="mdetail"/g) || []).length === 4, '候选卡块带基线胜率，每只怪各有一条可展开的明细', `${(bh.match(/class="mdetail"/g) || []).length} 条明细`);
+  ok(/class="pie"/.test(bh) && /预言/.test(bh) && /打击/.test(bh), '有伤害归因饼图（带卡名）', '');
+
+  const shot = await send('Page.captureScreenshot', { format: 'png' });  fs.writeFileSync(SHOT, Buffer.from(shot.result.data, 'base64'));
   ok(errors.length === 0, '页面没有 JS 报错', errors.slice(0, 2).join(' | '));
 } finally {
   try { ws && ws.close(); } catch {}

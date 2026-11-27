@@ -335,11 +335,7 @@
   "map": "暗巷",
   "kind": "weak"
  },
- "FLYCONID_WEAK": {
-  "map": "密林",
-  "kind": "weak"
- },
- "TURRET_OPERATOR_WEAK": {
+  "TURRET_OPERATOR_WEAK": {
   "map": "荣耀",
   "kind": "weak"
  },

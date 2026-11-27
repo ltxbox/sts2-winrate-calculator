@@ -4,6 +4,7 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
 // 自选对比最多几张候选卡（2026-11-27 主人要的：三张不够用）
 const CMP_MAX = 10;
+const UP_MAX = 10;
 // 药水栏上限：游戏里默认 3 个，但加了药水栏遗物/mod 能到更多，按 10 放开
 const POTION_MAX = 10;
 const TYPE_NAME = { 1: '攻击', 2: '技能', 3: '能力', 4: '状态', 5: '诅咒', 6: '特殊' };
@@ -214,6 +215,7 @@ function saveLocal() {
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
         mode: state.mode, cmpCards: state.cmpCards, restOpts: state.restOpts, lastJob: state.lastJob,
         midCollapsed: !!state.midCollapsed,
+        queue: (state.queue || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null })),
         deckListH: state.deckListH || 0,
       }));
     } catch { }
@@ -247,6 +249,9 @@ function loadLocal() {
   if (Number.isFinite(s.actIndex)) state.actIndex = s.actIndex;
   if (s.gameMode === 'Dread' || s.gameMode === 'Standard') state.gameMode = s.gameMode;
   if (typeof s.dreadBoss === 'string') state.dreadBoss = s.dreadBoss;
+  if (Array.isArray(s.queue)) {
+    state.queue = s.queue.filter(it => it && it.enc).map(it => ({ enc: it.enc, done: !!it.done, running: false, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, status: '' }));
+  }
   if (Number.isFinite(s.count)) state.count = s.count;
   if (s.prefix) state.prefix = s.prefix;
   if (s.potionPolicy) state.potionPolicy = s.potionPolicy;
@@ -1117,6 +1122,12 @@ function renderPool() {
 }
 
 /* ---------- encounters ---------- */
+/* 怪物资料外链：Spire Codex 的中文遭遇页（id 小写就能对上） */
+function encUrl(id) { return 'https://spire-codex.com/zhs/beta/encounters/' + String(id || '').toLowerCase(); }
+function encLink(id, name) {
+  return `<a class="enc-link" href="${encUrl(id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">${esc(name || id)} ↗</a>`;
+}
+
 function renderEncTabs() {
   $('#encTabs').onclick = e => {
     const b = e.target.closest('button[data-kind]');
@@ -1133,13 +1144,16 @@ function renderEncList() {
   const list = state.meta.encounters.filter(e => e.kind === state.encKind && (!q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q)));
   $('#encList').innerHTML = list.map(e => `
     <div class="enc-item ${state.encounter === e.id ? 'active' : ''}" data-id="${esc(e.id)}">
-      <span>${esc(e.name)}</span><span class="id">${esc(e.id)}</span>
+      <span>${esc(e.name)}</span><a class="enc-ext" href="${encUrl(e.id)}" target="_blank" rel="noreferrer noopener" title="去 Spire Codex 看这只怪的资料（血量、行动、敌人）">资料 ↗</a>
+      <span class="id">${esc(e.id)}</span>
     </div>`).join('') || '<div class="empty">没有匹配的遭遇</div>';
   $('#encList').onclick = e => {
+    if (e.target.closest('.enc-ext')) return;   // 点「资料 ↗」是开外链，不改当前遭遇
     const it = e.target.closest('.enc-item');
     if (!it) return;
     state.encounter = it.dataset.id;
     renderEncList();
+    renderQueue();
   };
 }
 
@@ -1205,14 +1219,23 @@ async function poll() {
     }
     if (!r.ok) throw new Error('查询失败');
     const job = await r.json();
+    if (job && job.status === 'gone') {
+      state.jobId = null; state.runningJob = null; syncStopBtn();
+      $('#progressText').textContent = '任务不存在（服务重启过）';
+      return;
+    }
     state.job = job;
+    state.runningJob = { id: state.jobId };
+    syncStopBtn();
     renderResults(job);
-    if (job.status === 'done' || job.status === 'failed') {
+    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+      state.runningJob = null;
+      syncStopBtn();
       state.running = false;
       $('#run').disabled = false;
       $('#bar').style.width = '100%';
-      $('#progressText').textContent = job.status === 'failed' ? '失败' : `完成 ${job.done}/${job.total}`;
-      $('#progLabel').textContent = job.status === 'failed' ? '失败' : '已完成';
+      $('#progressText').textContent = job.status === 'cancelled' ? `已终止 ${job.done}/${job.total}` : job.status === 'failed' ? '失败' : `完成 ${job.done}/${job.total}`;
+      $('#progLabel').textContent = job.status === 'cancelled' ? '已终止' : job.status === 'failed' ? '失败' : '已完成';
       // 汇总在 variants[0].summary 里（publicJob 没有顶层 summary）——之前只认 job.summary，导致「导出 CSV」一直灰着
       if (job.summary || (job.variants && job.variants[0] && job.variants[0].summary)) $('#csv').disabled = false;
       if (job.status === 'failed') $('#progressText').textContent = '失败：' + (job.lastError || '');
@@ -1294,6 +1317,23 @@ function turnHistBlock(summary) {
     text: `${x.runs} 局${total ? ` · ${(x.runs / total * 100).toFixed(0)}%` : ''}`,
   }));
   return barBlock('结束回合分布（几回合打完的有几局）', rows);
+}
+
+/** 对比卡里的紧凑分析：每局打出 / 每次伤害 / 结束回合分布 / 剩能量 / 常打的牌 */
+function cmpAnalysisMini(s) {
+  if (!s) return '';
+  const parts = [];
+  if (s.playsPerRun != null) parts.push(`每局打出 <b>${s.playsPerRun}</b> 张`);
+  if (s.attrTotal != null && s.playsTotal) parts.push(`每次 <b>${(s.attrTotal / s.playsTotal).toFixed(1)}</b> 伤害`);
+  if (s.energyWastePerTurn != null) parts.push(`剩能量 <b>${s.energyWastePerTurn}</b>/回合`);
+  const hist = (s.turnsHist || []).slice(0, 6).map(x => `${x.turns}回合×${x.runs}`).join(' · ');
+  const top = (s.plays || []).slice(0, 3).map(p => `${cardName(p.cardId)} ${p.total}`).join(' · ');
+  if (!parts.length && !hist && !top) return '';
+  return `<div class="cmp-mini2">
+    ${parts.length ? `<div>${parts.join(' · ')}</div>` : ''}
+    ${hist ? `<div class="muted tiny">结束回合：${esc(hist)}</div>` : ''}
+    ${top ? `<div class="muted tiny">常打的：${esc(top)}</div>` : ''}
+  </div>`;
 }
 
 function renderResults(job) {
@@ -1716,6 +1756,7 @@ function renderCompare(job, opts) {
         <span class="muted">${[s.avgTurns ? s.avgTurns + ' 回合' : '', s.runs ? (s.wins ?? 0) + '/' + s.runs + ' 局' : ''].filter(Boolean).join(' · ')}</span>
       </div>
       ${s.attribution && s.attribution.length ? attrBlock(s.attribution, '伤害归因', { compact: true, size: 118, max: 5 }) : ''}
+      ${cmpAnalysisMini(s)}
     </div>`;
   }).join('');
 
@@ -1729,10 +1770,10 @@ function renderCompare(job, opts) {
   const dppTxt = bestDpp == null
     ? ''
     : Math.abs(bestDpp) >= 0.05
-      ? `（比不升级 ${bestDpp > 0 ? '+' : ''}${bestDpp.toFixed(1)}pp）`
+      ? `（比不放 ${bestDpp > 0 ? '+' : ''}${bestDpp.toFixed(1)}pp）`
       : hpDiff != null && Math.abs(hpDiff) > 1
-        ? `（胜率跟不升级一样，掉血${hpDiff > 0 ? '少' : '多'} ${Math.abs(hpDiff).toFixed(1)}）`
-        : '（跟不升级一样）';
+        ? `（胜率跟不放一样，掉血${hpDiff > 0 ? '少' : '多'} ${Math.abs(hpDiff).toFixed(1)}）`
+        : '（跟不放一样）';
   const worstWr = cands.length ? Math.min(...cands.map(c => c.s.winrate || 0)) : 0;
   const tied = cands.length > 1 && (cands[0].s.winrate || 0) - worstWr < 0.05
     && Math.abs((cands[0].s.avgHpLost ?? 0) - (cands[cands.length - 1].s.avgHpLost ?? 0)) < 3;
@@ -1741,7 +1782,7 @@ function renderCompare(job, opts) {
     : (best.s.winrate || 0) <= 0
       ? `样本里这几张都没赢过（全灭）——先看看血量/遭遇是不是太狠，再比一次更靠谱。`
       : (o.verb === '该升' && tied)
-        ? `三张升哪张都差不多（胜率差不到 5pp、战损差不到 3）——按别的手感挑就行。`
+        ? `这几张升哪张都差不多（胜率差不到 5pp、战损差不到 3）——按别的手感挑就行。`
         : `${o.verb || '最稳的是'} <b>${esc(best.label)}</b>${dppTxt}：胜率 ${((best.s.winrate || 0) * 100).toFixed(1)}%，预估掉血 ${hpRangeText(best.s)}。`;
   box.innerHTML = `<div class="verdict">${verdict}</div><div class="cmp-cards">${rows}</div>`;
 }
@@ -1762,7 +1803,8 @@ function upDeckEntries() {
 function renderUpSlots() {
   const box = $('#upSlots');
   if (!box) return;
-  box.innerHTML = [0, 1, 2].map(i => {
+  const n = Math.min(UP_MAX, Math.max(1, state.upPicks.length + 1));
+  box.innerHTML = Array.from({ length: n }, (_, i) => {
     const idx = state.upPicks[i];
     const d = idx == null ? null : state.deck[idx];
     if (!d) return `<div class="slot empty">方案 ${i + 1}<span class="muted tiny">点下面的牌</span></div>`;
@@ -1804,7 +1846,7 @@ function renderUpDeck() {
     const i = Number(it.dataset.i);
     const at = state.upPicks.indexOf(i);
     if (at >= 0) state.upPicks.splice(at, 1);
-    else if (state.upPicks.length >= 3) { upHint('最多三张——先点上面槽位里的 × 移出一张'); return; }
+    else if (state.upPicks.length >= UP_MAX) { upHint('最多十张——先点上面槽位里的 × 移出一张'); return; }
     else state.upPicks.push(i);
     renderUpSlots(); renderUpDeck();
   };
@@ -1827,7 +1869,7 @@ function renderUpgradeAll() {
   renderUpSlots(); renderUpDeck(); renderUpState();
 }
 async function runUpgrade() {
-  if (state.upPicks.length < 2) { upHint('至少选两张牌才能比'); return; }
+  if (state.upPicks.length < 1) { upHint('至少选一张要升级的牌'); return; }
   autoCollapseMid();
   const btn = $('#upRun');
   btn.disabled = true;
@@ -1876,10 +1918,15 @@ function renderRestState() {
 function renderRestPanel() {
   const sel = $('#restCard');
   const cur = sel.value;
-  sel.innerHTML = state.deck.map(d => {
+  // 选项按「卡组里的第几行」来，不按卡名：同名两行（比如同一张牌一行升过一行没升）
+  // 以前 value 是卡名，选一张等于整组一起升，也看不出到底升 1 张还是全升。
+  sel.innerHTML = state.deck.map((d, i) => {
     const c = state.cardsById.get(d.cardId) || { name: d.cardId };
     const up = d.upgradeLevels || 0;
-    return `<option value="${esc(d.cardId)}" ${d.cardId === cur ? 'selected' : ''}>${esc(c.name)}${up ? '（已 +' + up + '）' : ''} ×${d.count}</option>`;
+    const dup = state.deck.filter(x => x.cardId === d.cardId).length > 1;
+    const tag = dup ? `（第 ${i + 1} 行）` : '';
+    const gone = up >= d.count ? ' · 这行已升满' : '';
+    return `<option value="${i}" ${String(i) === cur ? 'selected' : ''}${up >= d.count ? ' disabled' : ''}>${esc(c.name)}${up ? '（已升 ' + up + '）' : ''} ×${d.count}${tag}${gone}</option>`;
   }).join('') || '<option value="">卡组为空</option>';
   renderRestState();
   renderRestMath();
@@ -1904,8 +1951,8 @@ function renderRestMath() {
 
 async function runRest() {
   if (!state.deck.length) { alert('卡组是空的'); return; }
-  const cardId = $('#restCard').value;
-  if (!cardId) { alert('先选一张要升级的卡'); return; }
+  const targetIndex = Number($('#restCard').value);
+  if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= state.deck.length) { alert('先选一张要升级的卡'); return; }
   autoCollapseMid();
   const btn = $('#restRun');
   btn.disabled = true;
@@ -1919,7 +1966,7 @@ async function runRest() {
       ...modePayload(), hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'REST',
       potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
       nodes: 100000, budget: Number($('#restBudget').value) || 8000,
-      targetCardId: cardId,
+      targetIndex,
       rest: { healPercent: r0.pct, base: $('#restBase').value, pillow: r0.pillow, furnace: r0.furnace },
     };
     const r = await fetch('/api/rest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1955,6 +2002,7 @@ function renderRest(job) {
         <span class="muted">血 ${v.hp}/${v.maxHp}</span>
       </div>
       ${s.attribution && s.attribution.length ? attrBlock(s.attribution, '伤害归因', { compact: true, size: 118, max: 5 }) : ''}
+      ${cmpAnalysisMini(s)}
     </div>`;
   }).join('');
   const dwr = (rs.winrate || 0) - (us.winrate || 0);
@@ -1968,22 +2016,175 @@ function renderRest(job) {
   $('#restResult').innerHTML = `<div class="verdict">${verdict}<div class="muted tiny" style="margin-top:4px">${esc(math)}</div></div><div class="cmp-cards">${rows}</div>`;
 }
 
+/* ================= 排队：把多只怪排成一条队，一只一只算 ================= */
+function qName(id) {
+  const e = state.encById.get(id);
+  return e ? e.name : id;
+}
+function renderQueue() {
+  const box = $('#qList');
+  if (!box) return;
+  const q = state.queue || [];
+  if (!q.length) {
+    box.innerHTML = '<div class="muted tiny">从上面点怪物、点「+ 加入」；可以重复加同一只，顺序随便。没开始算的都能 × 掉。</div>';
+  } else {
+    box.innerHTML = q.map((it, i) => `<div class="q-item${it.running ? ' run' : ''}${it.done ? ' done' : ''}" data-i="${i}">
+      <span class="q-idx">${i + 1}</span>
+      <span class="q-name" title="${esc(it.status || '')}">${encLink(it.enc, qName(it.enc))}</span>
+      <span class="q-st">${it.running ? '算着…' : it.done ? (it.winrate == null ? '完了' : `${(it.winrate * 100).toFixed(1)}%`) : '等着'}</span>
+      <button class="ghost small" data-qdel="${i}" title="从队列里去掉（正在算的那只先点「■ 终止」）">×</button>
+    </div>`).join('');
+  }
+  const btn = $('#qRun');
+  if (btn) btn.disabled = !q.some(it => !it.done);
+  const add = $('#qAdd');
+  if (add) add.disabled = !state.encounter;
+  const cl = $('#qClear');
+  if (cl) cl.disabled = !q.length;
+  box.onclick = e => {
+    const del = e.target.closest('[data-qdel]');
+    if (!del) return;
+    const i = Number(del.dataset.qdel);
+    const it = state.queue[i];
+    if (it && it.running) { qHint('这只正在算——先点上面「■ 终止」'); return; }
+    state.queue.splice(i, 1);
+    saveLocal(); renderQueue();
+  };
+}
+let qHintTimer = null;
+function qHint(text) {
+  const box = $('#qResult');
+  if (!box) return;
+  const old = box.querySelector('.q-warn');
+  if (old) old.remove();
+  const d = document.createElement('div');
+  d.className = 'q-warn muted tiny';
+  d.textContent = text;
+  box.prepend(d);
+  clearTimeout(qHintTimer);
+  qHintTimer = setTimeout(() => d.remove(), 4000);
+}
+function addToQueue() {
+  if (!state.encounter) return;
+  state.queue = state.queue || [];
+  state.queue.push({ enc: state.encounter, done: false, running: false, winrate: null });
+  saveLocal(); renderQueue();
+}
+async function runQueue() {
+  const q = state.queue || [];
+  const first = q.findIndex(it => !it.done);
+  if (first < 0) { qHint('队列都算完了'); return; }
+  autoCollapseMid();
+  const btn = $('#qRun');
+  if (btn) btn.disabled = true;
+  let stopped = false;
+  for (let i = first; i < q.length; i++) {
+    const it = q[i];
+    if (it.done) continue;
+    it.running = true; renderQueue();
+    try {
+      const body = queuePayload(it.enc);
+      const r = await fetch('/api/solve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || '提交失败');
+      const job = await pollJob(j.id, jb => {
+        if (jb) { it.status = `${jb.done}/${jb.total} · ${jb.elapsedSec || 0}s`; renderQueue(); }
+        if (jb && jb.status === 'cancelled') stopped = true;
+      });
+      it.running = false;
+      if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; renderQueue(); break; }
+      const s = (job.variants && job.variants[0] && job.variants[0].summary) || {};
+      it.done = true; it.winrate = s.winrate; it.summary = s; it.status = '';
+      renderQueue(); renderQueueResults();
+    } catch (e) {
+      it.running = false; it.status = '失败：' + e.message; it.error = e.message;
+      renderQueue();
+      reportError('排队第 ' + (i + 1) + ' 只失败：' + e.message, e.stack || '');
+      break;
+    }
+  }
+  if (btn) btn.disabled = false;
+  autoExpandMid();
+}
+function queuePayload(enc) {
+  const deck = state.deck.map(d => ({
+    cardId: d.cardId, count: d.count, upgradeLevels: d.upgradeLevels || 0,
+    enchantmentId: d.enchantmentId || null, enchantmentAmount: d.enchantmentAmount || 0,
+  }));
+  return {
+    deck, relics: relicsForRequest(), potions: state.potions, encounter: enc,
+    character: state.character, ascension: state.ascension, ...modePayload(), actIndex: state.actIndex || 0,
+    hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'Q',
+    potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
+    nodes: 100000, budget: Number($('#budget') && $('#budget').value) || 8000,
+  };
+}
+function renderQueueResults() {
+  const box = $('#qResult');
+  if (!box) return;
+  const done = (state.queue || []).filter(it => it.done && it.summary);
+  if (!done.length) { box.innerHTML = ''; return; }
+  const rows = done.map(it => {
+    const s = it.summary;
+    return `<tr>
+      <td>${encLink(it.enc, qName(it.enc))}</td>
+      <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>
+      <td class="num">${hpRangeText(s)}</td>
+      <td class="num">${s.avgTurns != null ? s.avgTurns : '—'}</td>
+      <td class="num">${s.playsPerRun != null ? s.playsPerRun : '—'}</td>
+      <td class="num">${(s.attrTotal != null && s.playsTotal) ? (s.attrTotal / s.playsTotal).toFixed(1) : '—'}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `<table class="q-table"><thead><tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 /* ================= 通用轮询 ================= */
 function pollJob(id, onUpdate) {
+  state.runningJob = { id };
+  syncStopBtn();
   return new Promise(resolve => {
     const tick = async () => {
       try {
         const r = await fetch('/api/job/' + id);
-        if (!r.ok) { if (onUpdate) onUpdate(null); return resolve(null); }
+        if (!r.ok) { state.runningJob = null; syncStopBtn(); if (onUpdate) onUpdate(null); return resolve(null); }
         const job = await r.json();
+        if (job && job.status === 'gone') { state.runningJob = null; syncStopBtn(); if (onUpdate) onUpdate(null); return resolve(null); }
         if (onUpdate) onUpdate(job);
         if (job && job.total) setMidProgress(`${job.done}/${job.total}`);
-        if (job.status === 'done' || job.status === 'failed') { autoExpandMid(); return resolve(job); }
+        if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+          state.runningJob = null; syncStopBtn();
+          autoExpandMid(); return resolve(job);
+        }
       } catch { }
       setTimeout(tick, 900);
     };
     tick();
   });
+}
+
+/* 终止按钮：只在有任务跑着的时候出现 */
+function syncStopBtn() {
+  const b = $('#stopRun');
+  if (!b) return;
+  b.classList.toggle('hidden', !state.runningJob);
+  b.disabled = false;
+  b.textContent = '■ 终止';
+}
+
+async function stopRunning() {
+  const rj = state.runningJob;
+  if (!rj) return;
+  const b = $('#stopRun');
+  if (b) { b.disabled = true; b.textContent = '正在停…'; }
+  try {
+    const r = await fetch('/api/job/' + rj.id + '/cancel', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '停不下来');
+    state.lastStop = { id: rj.id, killed: j.killed, done: j.done, total: j.total, at: Date.now() };
+  } catch (e) {
+    reportError('终止失败：' + e.message, e.stack || '');
+    if (b) { b.disabled = false; b.textContent = '■ 终止'; }
+  }
 }
 
 const _p = new URLSearchParams(location.search);
@@ -1999,7 +2200,24 @@ if (_p.has('autotest')) {
 if (_p.has('refresh')) {
   setTimeout(refreshFromGame, 400);
 }
-init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); });
+init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); bindQueue(); });
+
+/* 队列与终止按钮的绑定（排在 init 之后，元素一定在了） */
+function bindQueue() {
+  const stop = $('#stopRun');
+  if (stop) stop.onclick = stopRunning;
+  syncStopBtn();
+  const add = $('#qAdd');
+  if (add) add.onclick = addToQueue;
+  const runBtn = $('#qRun');
+  if (runBtn) runBtn.onclick = runQueue;
+  const cl = $('#qClear');
+  if (cl) cl.onclick = () => {
+    if ((state.queue || []).some(it => it.running)) { qHint('有任务正在算——先点上面「■ 终止」'); return; }
+    state.queue = []; saveLocal(); renderQueue(); renderQueueResults();
+  };
+  renderQueue(); renderQueueResults();
+}
 
 /* ---------- 截图导入：卡组 + 遗物 ---------- */
 const shot = { img: null, cards: [], relics: [], feats: null };

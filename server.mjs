@@ -374,6 +374,7 @@ function runOne(job, variant, seed) {
     try {
       if (!HARNESS_CMD) throw new Error('没有可用的模拟器（harness 不在包里，也没配 STS2_HARNESS）');
       child = spawn(HARNESS_CMD, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      if (job.children) job.children.add(child);
     } catch (e) {
       job.lastError = explainHarnessFailure('', null) + ' 内部：' + e.message;
       return resolve({ seed, won: null, hpLost: null, deficit: null, status: 'spawn-error', sec: 0, note: job.lastError });
@@ -386,6 +387,7 @@ function runOne(job, variant, seed) {
       resolve({ seed, won: null, hpLost: null, deficit: null, status: 'spawn-error', sec: 0, note: job.lastError });
     });
     child.on('exit', (code) => {
+      if (job.children) job.children.delete(child);
       const sec = Math.round((Date.now() - started) / 100) / 10;
       let row = { seed, won: null, hpLost: null, deficit: null, status: 'no-result', sec };
       const hr = readJson(path.join(dir, 'harness-result.json'));
@@ -431,6 +433,7 @@ function runOne(job, variant, seed) {
       const qualityObj = (hr && hr.comparisonQuality) || (r && r.comparisonQuality);
       const potVal = pick(qualityObj, 'ProjectedBattlePotionCount');
       if (Number.isFinite(potVal)) row.potionsUsed = potVal;
+      if (job.cancelled) row.status = 'cancelled';
       // 明细删掉，省磁盘（KEEP_RUNS=1 时保留，便于排查）
       if (!process.env.KEEP_RUNS) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { } }
       resolve(row);
@@ -556,16 +559,24 @@ async function runVariants(job) {
   job.startedAt = Date.now();
   async function worker() {
     while (true) {
+      if (job.cancelled) return;
       const i = idx++;
       if (i >= tasks.length) return;
       const t = tasks[i];
       const row = await runOne(job, t.v, t.s);
+      if (job.cancelled && row.status === 'cancelled') return;
       t.v.results.push(row);
       job.done = (job.done || 0) + 1;
     }
   }
   await Promise.all(Array.from({ length: workers }, worker));
   job.finishedAt = Date.now();
+  if (job.cancelled) {
+    job.status = 'cancelled';
+    job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
+    try { for (const v of job.variants) if (v.results.length) summarizeVariant(v); } catch { }
+    return;
+  }
   job.status = 'done';
   for (const v of job.variants) summarizeVariant(v);
   const base = job.variants[0].summary;
@@ -852,11 +863,31 @@ function newJob(body, mode, variants, meta) {
     potionPolicy: body.potionPolicy || 'Disabled', budget: Number(body.budget) || 5000,
     actIndex: Number(body.actIndex) || 0,
     dir: path.join(RUNS, id), lastError: null, startedAt: Date.now(),
+    cancelled: false, children: new Set(),
   };
   fs.mkdirSync(job.dir, { recursive: true });
   jobs.set(id, job);
   runVariants(job).catch(e => { job.status = 'failed'; job.lastError = String(e && e.message || e); });
   return job;
+}
+
+/* ---------- 终止：杀掉这一局正在跑的模拟器子进程，剩下的样本不再派发 ---------- */
+function cancelJob(job) {
+  if (!job || job.status !== 'running') return { ok: false, error: '这个任务已经不在跑了' };
+  job.cancelled = true;
+  job.status = 'cancelled';
+  job.finishedAt = Date.now();
+  job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
+  let killed = 0;
+  for (const c of job.children || []) {
+    try { c.kill('SIGTERM'); killed++; } catch { }
+  }
+  // Windows 上模拟器有时不理会 SIGTERM，1.5 秒后补一刀
+  setTimeout(() => {
+    for (const c of job.children) { try { c.kill('SIGKILL'); } catch { } }
+    job.children.clear();
+  }, 1500);
+  return { ok: true, killed, done: job.done, total: job.total };
 }
 
 /* ---------- 启动时把历史结果读回来（重启不再清空） ---------- */
@@ -927,7 +958,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && u.pathname === '/api/upgrade3') {
-      // 三选一升级：基线 = 卡组不动；每个方案 = 只把某一条的「已升级张数」+1，其余不变
+      // 自选升级：基线 = 卡组不动；每个方案 = 只把某一条的「已升级张数」+1，其余不变
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
       if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
@@ -935,8 +966,8 @@ const server = http.createServer(async (req, res) => {
       const idxs = [...new Set((body.picks || [])
         .map(p => Number(p && p.index))
         .filter(i => Number.isInteger(i) && i >= 0 && i < deck.length))];
-      if (idxs.length < 2) return send(res, 400, { error: '至少选两张不同的牌' });
-      if (idxs.length > 3) return send(res, 400, { error: '最多三张' });
+      if (idxs.length < 1) return send(res, 400, { error: '至少选一张要升级的牌' });
+      if (idxs.length > 10) return send(res, 400, { error: '最多十张候选卡' });
       const hp = Number(body.hp) || 0, maxHp = Number(body.maxHp) || 0;
       const variants = [{ key: 'base', label: '基线（不升级）', deck, hp, maxHp, results: [], summary: null }];
       for (const idx of idxs) {
@@ -957,7 +988,6 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
       if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
-      if (!body.targetCardId) return send(res, 400, { error: '要选一张要升级的卡' });
       const deck = normDeck(body.deck);
       const hp = Number(body.hp) || 0, maxHp = Number(body.maxHp) || 0;
       const opts = body.rest || {};
@@ -965,8 +995,19 @@ const server = http.createServer(async (req, res) => {
       const pct = Number(opts.healPercent ?? 30) / 100;
       const base = opts.base === 'current' ? hp : maxHp;
 
-      // 升级：只有一张，其余不变，血量不变
-      const upDeck = deck.map(d => (d.cardId === body.targetCardId ? { ...d, upgradeLevels: (d.upgradeLevels || 0) + 1 } : d));
+      // 升级：只把「选中的那一行」升 1 张（按行号，不按卡名——同名两行各升各的）
+      const tIdx = Number.isInteger(Number(body.targetIndex)) && Number(body.targetIndex) >= 0 && Number(body.targetIndex) < deck.length
+        ? Number(body.targetIndex) : -1;
+      const tCard = body.targetCardId;
+      if (tIdx < 0 && !tCard) return send(res, 400, { error: '要选一张要升级的卡' });
+      if (tIdx >= 0) {
+        const d = deck[tIdx];
+        if (!d) return send(res, 400, { error: '这张牌不在卡组里' });
+        if ((Number(d.upgradeLevels) || 0) >= d.count) return send(res, 400, { error: `${d.cardId} 这一行已经没有可升级的副本了（${d.upgradeLevels || 0}/${d.count}）` });
+      }
+      const upDeck = deck.map((d, i) => (i === tIdx ? { ...d, upgradeLevels: (Number(d.upgradeLevels) || 0) + 1 }
+        : tIdx < 0 && d.cardId === tCard ? { ...d, upgradeLevels: (Number(d.upgradeLevels) || 0) + 1 } : d));
+      const targetLabel = tIdx >= 0 ? (deck[tIdx] && deck[tIdx].cardId) : tCard;
 
       // 睡觉：不回血牌，加血（+上限）
       const heal = Math.round(base * pct) + (pillow ? 15 : 0);
@@ -974,11 +1015,11 @@ const server = http.createServer(async (req, res) => {
       const restHp = Math.min(restMax, hp + heal + (furnace ? 5 : 0));
 
       const variants = [
-        { key: 'upgrade', label: '升级 ' + body.targetCardId, deck: upDeck, hp, maxHp, results: [], summary: null },
+        { key: 'upgrade', label: '升级 ' + targetLabel, deck: upDeck, hp, maxHp, results: [], summary: null },
         { key: 'rest', label: '睡觉回血', deck, hp: restHp, maxHp: restMax, results: [], summary: null },
       ];
       const job = newJob(body, 'rest', variants, {
-        targetCardId: body.targetCardId,
+        targetCardId: targetLabel, targetIndex: tIdx,
         rest: { healPercent: Number(opts.healPercent ?? 30), pillow, furnace, base: opts.base || 'max', heal, hpBefore: hp, hpAfter: restHp, maxHpBefore: maxHp, maxHpAfter: restMax },
       });
       return send(res, 200, { id: job.id, variants: 2, rest: job.meta.rest });
@@ -1037,10 +1078,20 @@ const server = http.createServer(async (req, res) => {
         return send(res, 500, { error: msg });
       }
     }
+    if (req.method === 'POST' && /^\/api\/job\/[^/]+\/cancel$/.test(u.pathname)) {
+      const id = u.pathname.slice('/api/job/'.length, -'/cancel'.length);
+      const job = jobs.get(id);
+      if (!job) return send(res, 404, { error: 'job not found' });
+      const r = cancelJob(job);
+      if (!r.ok) return send(res, 409, r);
+      return send(res, 200, { id, status: 'cancelled', killed: r.killed, done: r.done, total: r.total });
+    }
     if (req.method === 'GET' && u.pathname.startsWith('/api/job/')) {
       const id = u.pathname.slice('/api/job/'.length);
       const job = jobs.get(id);
-      if (!job) return send(res, 404, { error: 'job not found' });
+      // 服务重启后内存里的 job 就没了：这里回 200 + status=gone，
+      // 别再回 404——浏览器会把它记成「资源加载失败」，污染前端报错检查。
+      if (!job) return send(res, 200, { id, status: 'gone', total: 0, done: 0, variants: [], message: '任务不存在（服务重启过）' });
       return send(res, 200, publicJob(job));
     }
     if (req.method === 'GET' && u.pathname === '/api/diag') {

@@ -29,6 +29,7 @@
   <div class="runbox">
     <button id="run" class="primary">开始测算</button>
     <button id="selftest" class="ghost" title="跑 1 局小样本，确认模拟器、游戏目录、模组都正常">自检</button>
+    <button id="stopRun" class="ghost small hidden" title="停掉正在跑的任务（已算完的样本保留）">■ 终止</button>
     <div class="progress"><div id="bar"></div></div>
     <span id="progressText">就绪</span>
   </div>
@@ -106,6 +107,9 @@
       <button data-kind="event">事件</button>
     </div>
     <div id="encList" class="enc-list"></div>
+    <div class="panel-head pool-head queue-head"><h3>排队（多怪连着算）</h3><button id="qAdd" class="ghost small" title="把当前选中的遭遇加进队列">+ 加入</button><button id="qRun" class="primary small" title="按队列顺序一只一只算">开始排队</button><button id="qClear" class="ghost small">清空</button></div>
+    <div id="qList" class="queue-list"><div class="muted tiny">从上面点怪物、点「+ 加入」；可以重复加同一只，顺序随便。没开始算的都能 × 掉。</div></div>
+    <div id="qResult" class="queue-result"></div>
   </section>
 </main>
 
@@ -140,9 +144,9 @@
 
 <main class="cols cols-compare hidden" id="modeUpgrade">
   <section class="panel side-rail">
-    <div class="panel-head"><h3>选三张要升级的牌</h3><button id="upClear" class="ghost small">清空</button></div>
+    <div class="panel-head"><h3>选要升级的牌（1–10 张）</h3><button id="upClear" class="ghost small">清空</button></div>
     <div id="upSlots" class="slots"></div>
-    <div class="muted tiny hint-line">从下面点三张（同一行只能选一次）；每个方案只升这一张、其余不动，和「不升级」同种子比。</div>
+    <div class="muted tiny hint-line">从下面点要升级的牌（随便几张，一行只能选一次）；每个方案只升这一张的 1 份、其余不动，和「不升级」同种子比。</div>
     <div class="panel-head pool-head"><h3>当前卡组</h3><span id="upDeckCount" class="muted tiny"></span></div>
     <div id="upDeck" class="up-deck"></div>
   </section>
@@ -155,7 +159,7 @@
       <span id="upProgress" class="muted tiny"></span>
       <button id="upRun" class="primary small push-right">开始对比</button>
     </div>
-    <div id="upResult" class="cmp-result"><div class="empty">在左边选三张牌，点「开始对比」</div></div>
+    <div id="upResult" class="cmp-result"><div class="empty">在左边选要升级的牌（1–10 张），点「开始对比」</div></div>
   </section>
 </main>
 

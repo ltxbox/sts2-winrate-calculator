@@ -378,3 +378,28 @@ dialog::backdrop { background: #000a; }
 .mid-strip .mid-prog { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); font-size: 11px; font-weight: 400; color: #7d879a; }
 .mid-strip .mid-prog:empty { display: none; }
 .mid-strip i { position: absolute; left: 50%; top: 7px; transform: translateX(-50%); font-style: normal; font-size: 14px; opacity: .7; }
+.cmp-mini2 { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; padding-top: 6px; border-top: 1px dashed #2b3340; font-size: 12px; color: #c8d0dc; }
+.cmp-mini2 b { color: #e8eef7; }
+
+/* ---- 排队 + 终止 + 怪物外链（2026-11-27 12:4x） ---- */
+.queue-head { margin-top: 6px; gap: 4px; }
+.queue-head h3 { font-size: 13px; }
+.queue-list { display: flex; flex-direction: column; gap: 3px; padding: 4px 8px 8px; overflow-y: auto; max-height: 168px; }
+.queue-list .q-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px; background: #1b2029; font-size: 12px; }
+.queue-list .q-item.run { outline: 1px solid #4a7; background: #1d2a24; }
+.queue-list .q-item.done { opacity: .72; }
+.queue-list .q-idx { color: #7d879a; min-width: 14px; text-align: right; }
+.queue-list .q-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-list .q-st { color: #8fa0b8; }
+.queue-list .q-warn { color: #e8b455; }
+.queue-result { padding: 0 8px 8px; }
+.q-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.q-table th { text-align: left; color: #8b95a7; font-weight: 600; padding: 3px 4px; border-bottom: 1px solid #2b3340; }
+.q-table td { padding: 3px 4px; border-bottom: 1px dashed #232a35; }
+.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.enc-ext { color: #6aa9ff; font-size: 11px; text-decoration: none; padding: 0 2px; }
+.enc-ext:hover { text-decoration: underline; }
+.enc-link { color: inherit; text-decoration: none; }
+.enc-link:hover { color: #6aa9ff; text-decoration: underline; }
+#stopRun { color: #f0a0a0; border-color: #7a3b3b; }
+#stopRun.hidden { display: none; }

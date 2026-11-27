@@ -875,7 +875,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && u.pathname === '/api/import') {
       try { return send(res, 200, importGameState()); }
-      catch (e) { return send(res, 500, { error: String(e && e.message || e) }); }
+      catch (e) {
+        const msg = String(e && e.message || e);
+        // 没有进行中的存档是常态（刚打完一局/还没进过战斗），不是服务出错：
+        // 用 200 + ok:false 回，前端弹一句人话，别在控制台留个红色的 500
+        if (/current_run\.save/.test(msg)) return send(res, 200, { ok: false, code: 'NO_SAVE', error: msg });
+        return send(res, 500, { error: msg });
+      }
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/job/')) {
       const id = u.pathname.slice('/api/job/'.length);

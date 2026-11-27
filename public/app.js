@@ -39,6 +39,9 @@ const state = {
   // 遗物计数器（从存档读来的实际数字）：{ RELIC_ID: { ints:[{name,value}], bools:[...] } }
   relicProps: {},
   restOpts: { pct: 30, base: 'max', pillow: false, furnace: false },
+  // 中间「测算结果」栏收不收起来（收起后左栏变宽）；midAuto = 这次收起是开跑时自动做的，跑完要自动展开
+  midCollapsed: false,
+  midAuto: false,
 };
 
 /* 并发：按 CPU 核数取，16 核 -> 12（实测比 4 路快 1.74 倍） */
@@ -95,6 +98,70 @@ function bindErrorBar() {
   };
   if (close) close.onclick = hideError;
 }
+/* ---------- 中间「测算结果」栏：收起来，把地方让给左边的卡组/卡池 ----------
+   自动：开跑时收、跑完自动展开；手动：栏头的 ⟨/⟩ 按钮、收起后的竖条、Alt+M 都能切换。
+   规则：手动收起来的，跑完不会被强行展开（只有「开跑时自动收的」才会自动展开）。 */
+
+function midPanels() { return $$('.mid-panel'); }
+
+function setMidProgress(text) {
+  $$('.mid-prog').forEach(el => { el.textContent = text || ''; });
+}
+
+function applyMidCollapsed(collapsed) {
+  state.midCollapsed = !!collapsed;
+  $$('main.cols').forEach(m => m.classList.toggle('mid-collapsed', state.midCollapsed));
+  midPanels().forEach(p => p.classList.toggle('is-collapsed', state.midCollapsed));
+  $$('.mid-toggle').forEach(b => {
+    b.textContent = state.midCollapsed ? '⟩' : '⟨';
+    b.title = state.midCollapsed ? '展开结果栏（Alt+M）' : '收起结果栏，给左边腾地方（Alt+M）';
+  });
+  if (!state.midCollapsed) setMidProgress('');
+  saveLocal();
+}
+
+// auto=true：这次收起是「开跑」自动做的，记下来，跑完自动展开
+function setMidCollapsed(collapsed, auto) {
+  state.midAuto = auto ? !!collapsed : false;
+  applyMidCollapsed(collapsed);
+}
+function autoCollapseMid() {
+  // 已经是手动的收起了就别动它——否则「手动收起」会被当成「自动收起」，跑完又自己弹开
+  if (state.midCollapsed) return;
+  setMidCollapsed(true, true);
+}
+function autoExpandMid() { if (state.midAuto) { state.midAuto = false; setMidCollapsed(false); } }
+
+function bindMidCollapse() {
+  midPanels().forEach(panel => {
+    const head = panel.querySelector('.panel-head');
+    if (!head) return;
+    if (!head.querySelector('.mid-toggle')) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ghost small mid-toggle';
+      b.onclick = e => { e.stopPropagation(); setMidCollapsed(!state.midCollapsed); };
+      head.appendChild(b);
+    }
+    if (!panel.querySelector('.mid-strip')) {
+      const s = document.createElement('button');
+      s.type = 'button';
+      s.className = 'mid-strip';
+      s.title = '展开结果栏（Alt+M）';
+      s.innerHTML = '<i>⟩</i><span class="mid-label">测算结果</span><b class="mid-prog"></b>';
+      s.onclick = () => setMidCollapsed(false);
+      panel.insertBefore(s, panel.firstChild);
+    }
+  });
+  window.addEventListener('keydown', e => {
+    if (e.altKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
+      e.preventDefault();
+      setMidCollapsed(!state.midCollapsed);
+    }
+  });
+  applyMidCollapsed(!!state.midCollapsed);
+}
+
 function saveLocal() {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
@@ -107,6 +174,7 @@ function saveLocal() {
         gameMode: state.gameMode, dreadBoss: state.dreadBoss,
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
         mode: state.mode, cmpCards: state.cmpCards, restOpts: state.restOpts, lastJob: state.lastJob,
+        midCollapsed: !!state.midCollapsed,
       }));
     } catch { }
   }, 250);
@@ -146,6 +214,7 @@ function loadLocal() {
   state.cmpCards = arr(s.cmpCards).filter(c => c && c.cardId);
   if (s.lastJob && s.lastJob.id) state.lastJob = { id: String(s.lastJob.id), mode: s.lastJob.mode || 'single' };
   if (s.restOpts) state.restOpts = { ...state.restOpts, ...s.restOpts };
+  state.midCollapsed = !!s.midCollapsed;
   const st = starterRelicOf(state.character);
   if (st) state.relics = state.relics.filter(r => r !== st);
   return true;
@@ -947,6 +1016,8 @@ async function refreshFromGame() {
     const r = await fetch('/api/import');
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || '读取失败');
+    // 服务端没有进行中的存档时会回 200 + ok:false（不是错，只是没得读）
+    if (j.ok === false) throw new Error(j.error || '没有找到进行中的存档');
     // 存档里同一种卡会按「升级/附魔」拆成多条，界面一行只能挂一种附魔 → 合并成一行
     const merged = DeckLogic.mergeImported(j.deck || []);
     state.deck = merged.deck;
@@ -1035,6 +1106,7 @@ function renderEncList() {
 async function run() {
   if (!state.deck.length) { alert('卡组不能为空'); return; }
   if (!state.encounter) { alert('先选一个遭遇'); return; }
+  autoCollapseMid();
   state.running = true;
   $('#run').disabled = true;
   $('#csv').disabled = true;
@@ -1071,6 +1143,7 @@ async function run() {
     state.jobId = j.id;
     state.lastJob = { id: j.id, mode: 'single' }; saveLocal();
     $('#progressText').textContent = `0/${j.total}`;
+    setMidProgress(`0/${j.total}`);
     poll();
   } catch (e) {
     state.running = false;
@@ -1101,9 +1174,11 @@ async function poll() {
       $('#progLabel').textContent = job.status === 'failed' ? '失败' : '已完成';
       if (job.summary) $('#csv').disabled = false;
       if (job.status === 'failed') $('#progressText').textContent = '失败：' + (job.lastError || '');
+      autoExpandMid();
       return;
     }
     $('#progressText').textContent = `${job.done}/${job.total}`;
+    setMidProgress(`${job.done}/${job.total}`);
     $('#bar').style.width = (job.total ? job.done / job.total * 100 : 0) + '%';
     state.timer = setTimeout(poll, 900);
   } catch (e) {
@@ -1457,6 +1532,7 @@ function renderCmpPool() {
 async function runCompare() {
   if (!state.deck.length) { alert('卡组是空的：先在「单场测算」里导入或组牌'); return; }
   if (state.cmpCards.length < 2) { alert('至少选两张候选卡'); return; }
+  autoCollapseMid();
   const btn = $('#cmpRun');
   btn.disabled = true;
   $('#cmpResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -1624,6 +1700,7 @@ function renderUpgradeAll() {
 }
 async function runUpgrade() {
   if (state.upPicks.length < 2) { upHint('至少选两张牌才能比'); return; }
+  autoCollapseMid();
   const btn = $('#upRun');
   btn.disabled = true;
   $('#upResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -1701,6 +1778,7 @@ async function runRest() {
   if (!state.deck.length) { alert('卡组是空的'); return; }
   const cardId = $('#restCard').value;
   if (!cardId) { alert('先选一张要升级的卡'); return; }
+  autoCollapseMid();
   const btn = $('#restRun');
   btn.disabled = true;
   $('#restResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -1771,7 +1849,8 @@ function pollJob(id, onUpdate) {
         if (!r.ok) { if (onUpdate) onUpdate(null); return resolve(null); }
         const job = await r.json();
         if (onUpdate) onUpdate(job);
-        if (job.status === 'done' || job.status === 'failed') return resolve(job);
+        if (job && job.total) setMidProgress(`${job.done}/${job.total}`);
+        if (job.status === 'done' || job.status === 'failed') { autoExpandMid(); return resolve(job); }
       } catch { }
       setTimeout(tick, 900);
     };
@@ -1792,7 +1871,7 @@ if (_p.has('autotest')) {
 if (_p.has('refresh')) {
   setTimeout(refreshFromGame, 400);
 }
-init().then(() => { bindModes(); bindErrorBar(); bindShot(); });
+init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); });
 
 /* ---------- 截图导入：卡组 + 遗物 ---------- */
 const shot = { img: null, cards: [], relics: [], feats: null };

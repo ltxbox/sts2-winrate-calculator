@@ -129,19 +129,20 @@ try {
     first.click();
     const inState = state.potions.length;
     const chips = [...document.querySelectorAll('#potionList .chip')].map(c => c.textContent.replace('×', '').trim());
-    // 再点三次同一瓶：每点一次网格会重画，所以要重新查一次（和真人点一样）
-    for (let i = 0; i < 3; i++) document.querySelector('#potionGrid .potion-opt').click();
+    // 一路点到 10 瓶（每点一次网格会重画，所以要每次重新查）；第 11 次应该被挡
+    for (let i = 0; i < 20; i++) document.querySelector('#potionGrid .potion-opt').click();
     const capped = state.potions.length;
+    const capMsg = document.querySelector('#potionDlgCount').textContent;
     document.querySelector('#potionDlgClose').click();
     const del = document.querySelector('#potionList .chip .x');
     del.click();
     const afterDel = state.potions.length;
-    return { opened, name, inState, chips, capped, afterDel };
+    return { opened, name, inState, chips, capped, capMsg, afterDel };
   })()`);
   ok(potions.opened, '「+ 选药水」点开弹窗');
   ok(potions.inState === 1 && potions.chips.length === 1, '点一瓶就加进卡组栏', JSON.stringify(potions.chips));
-  ok(potions.capped === 3, '最多 3 瓶（点第 4 次被挡）', String(potions.capped));
-  ok(potions.afterDel === 2, '点 × 能删一瓶', String(potions.afterDel));
+  ok(potions.capped === 10 && /10/.test(potions.capMsg), '药水最多 10 瓶（第 11 次被挡）', `${potions.capped} 瓶 · ${potions.capMsg}`);
+  ok(potions.afterDel === 9, '点 × 能删一瓶', String(potions.afterDel));
 
   // ---------- 3) 遗物计数显示 / 修改 ----------
   const counters = await evaluate(`(() => {

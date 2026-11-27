@@ -756,7 +756,7 @@ const server = http.createServer(async (req, res) => {
       if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
       const cands = (body.candidates || []).filter(c => c && c.cardId);
       if (!cands.length) return send(res, 400, { error: '至少给一张候选卡' });
-      if (cands.length > 3) return send(res, 400, { error: '最多三张候选卡' });
+      if (cands.length > 10) return send(res, 400, { error: '最多十张候选卡' });
       const deck = normDeck(body.deck);
       const hp = Number(body.hp) || 0, maxHp = Number(body.maxHp) || 0;
       const variants = [{ key: 'base', label: '基线（不放卡）', deck, hp, maxHp, results: [], summary: null }];

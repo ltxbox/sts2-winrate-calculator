@@ -2,6 +2,10 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
+// 自选对比最多几张候选卡（2026-11-27 主人要的：三张不够用）
+const CMP_MAX = 10;
+// 药水栏上限：游戏里默认 3 个，但加了药水栏遗物/mod 能到更多，按 10 放开
+const POTION_MAX = 10;
 const TYPE_NAME = { 1: '攻击', 2: '技能', 3: '能力', 4: '状态', 5: '诅咒', 6: '特殊' };
 const TYPE_CLASS = { 1: 't-attack', 2: 't-skill', 3: 't-power', 4: 't-status', 5: 't-curse', 6: 't-special' };
 const RARITY_NAME = { 1: '基础', 2: '普通', 3: '罕见', 4: '稀有', 5: '特殊', 6: '特殊', 7: '衍生', 8: '状态', 9: '诅咒', 10: '事件' };
@@ -661,7 +665,7 @@ function potionById(id) { return (state.meta.potions || []).find(p => p.id === i
 function renderPotionChips() {
   const box = $('#potionList');
   if (!box) return;
-  if (!state.potions.length) { box.innerHTML = '<span class="muted">点「+ 选药水」加药水（游戏里最多 3 瓶）</span>'; return; }
+  if (!state.potions.length) { box.innerHTML = `<span class="muted">点「+ 选药水」加药水（最多 ${POTION_MAX} 瓶）</span>`; return; }
   box.innerHTML = state.potions.map((id, i) => {
     const p = potionById(id);
     return `<span class="chip" data-idx="${i}" title="${esc(p ? p.desc : id)}"><span>${esc(p ? p.name : id)}</span><span class="x" data-op="del" title="移除">×</span></span>`;
@@ -684,7 +688,7 @@ function renderPotionGrid(q) {
   const ql = (q || '').trim().toLowerCase();
   const list = (state.meta.potions || []).filter(p => !ql ||
     p.name.toLowerCase().includes(ql) || p.id.toLowerCase().includes(ql) || String(p.desc || '').toLowerCase().includes(ql));
-  $('#potionDlgCount').textContent = `${list.length} 种 · 已带 ${state.potions.length}/3`;
+  $('#potionDlgCount').textContent = `${list.length} 种 · 已带 ${state.potions.length}/${POTION_MAX}`;
   $('#potionGrid').innerHTML = list.map(p => {
     const n = state.potions.filter(x => x === p.id).length;
     return `<div class="relic-opt potion-opt ${n ? 'on' : ''}" data-id="${esc(p.id)}" title="${esc(p.desc)}">
@@ -694,8 +698,8 @@ function renderPotionGrid(q) {
   $('#potionGrid').onclick = e => {
     const opt = e.target.closest('.potion-opt');
     if (!opt) return;
-    if (state.potions.length >= 3) {
-      $('#potionDlgCount').textContent = '最多 3 瓶（游戏里就 3 个药水栏）';
+    if (state.potions.length >= POTION_MAX) {
+      $('#potionDlgCount').textContent = `最多 ${POTION_MAX} 瓶（药水栏上限）`;
       return;
     }
     state.potions.push(opt.dataset.id);
@@ -1520,9 +1524,11 @@ function renderCmpState() {
 
 function renderCmpSlots() {
   const box = $('#cmpSlots');
-  const slots = [0, 1, 2].map(i => {
+  // 至少摆 3 个空槽（看着像「三选一」的老习惯），选多了就长到 10 个
+  const n = Math.min(CMP_MAX, Math.max(3, state.cmpCards.length + 1));
+  const slots = Array.from({ length: n }, (_, i) => {
     const c = state.cmpCards[i];
-    if (!c) return `<div class="slot empty">槽 ${i + 1}<span class="muted tiny">点下面的牌</span></div>`;
+    if (!c) return `<div class="slot empty" data-slot="${i}">槽 ${i + 1}<span class="muted tiny">点下面的牌</span></div>`;
     const card = state.cardsById.get(c.cardId) || { id: c.cardId, name: c.cardId };
     return `<div class="slot" data-i="${i}">
       ${imgTag(card)}
@@ -1535,6 +1541,7 @@ function renderCmpSlots() {
   box.onclick = e => {
     const del = e.target.closest('[data-del]');
     if (del) { state.cmpCards.splice(Number(del.dataset.del), 1); renderCmpSlots(); return; }
+    if (e.target.closest('.slot.empty')) $('#cmpSearch').focus();
   };
   box.onchange = e => {
     const up = e.target.closest('[data-up]');
@@ -1559,7 +1566,7 @@ function renderCmpPool() {
   $('#cmpPool').onclick = e => {
     const it = e.target.closest('.card-item');
     if (!it) return;
-    if (state.cmpCards.length >= 3) { alert('最多三张'); return; }
+    if (state.cmpCards.length >= CMP_MAX) { alert(`最多 ${CMP_MAX} 张`); return; }
     if (state.cmpCards.some(x => x.cardId === it.dataset.id)) return;
     state.cmpCards.push({ cardId: it.dataset.id, upgradeLevels: 0 });
     renderCmpSlots();
@@ -1568,7 +1575,7 @@ function renderCmpPool() {
 
 async function runCompare() {
   if (!state.deck.length) { alert('卡组是空的：先在「单场测算」里导入或组牌'); return; }
-  if (state.cmpCards.length < 2) { alert('至少选两张候选卡'); return; }
+  if (state.cmpCards.length < 1) { alert('至少选一张候选卡'); return; }
   autoCollapseMid();
   const btn = $('#cmpRun');
   btn.disabled = true;

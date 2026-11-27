@@ -37,7 +37,7 @@
 
 <nav class="modes" id="modes">
   <button data-mode="single" class="active">单场测算</button>
-  <button data-mode="compare">三卡对比</button>
+  <button data-mode="compare">自选对比</button>
   <button data-mode="upgrade">三选一升级</button>
   <button data-mode="rest">升级 vs 睡觉</button>
 </nav>
@@ -108,9 +108,9 @@
 
 <main class="cols cols-compare hidden" id="modeCompare">
   <section class="panel side-rail">
-    <div class="panel-head"><h3>候选卡（最多 3 张）</h3><button id="cmpClear" class="ghost small">清空</button></div>
+    <div class="panel-head"><h3>候选卡（1–10 张）</h3><button id="cmpClear" class="ghost small">清空</button></div>
     <div id="cmpSlots" class="slots"></div>
-    <div class="muted tiny hint-line">点下面的牌加入空槽；勾「+」按升级态加入。卡组用「单场测算」那套。</div>
+    <div class="muted tiny hint-line">点下面的牌加入空槽（最多 10 张）；有空槽时点一次就添一张。卡组用「单场测算」那套。</div>
     <div class="panel-head pool-head">
       <input id="cmpSearch" type="search" placeholder="搜索卡牌（中文 / ID）">
       <select id="cmpType">
@@ -131,7 +131,7 @@
       <span id="cmpProgress" class="muted tiny"></span>
       <button id="cmpRun" class="primary small push-right">开始对比</button>
     </div>
-    <div id="cmpResult" class="cmp-result"><div class="empty">选三张卡，点「开始对比」</div></div>
+    <div id="cmpResult" class="cmp-result"><div class="empty">选 1–10 张卡，点「开始对比」</div></div>
   </section>
 </main>
 

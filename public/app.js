@@ -38,7 +38,7 @@ const state = {
   hp: 37, maxHp: 66, ascension: 10, actIndex: 0,
   gameMode: 'Standard', dreadBoss: '', dreadList: [], serverCaps: null,
   count: 100, prefix: 'HISRUN', potionPolicy: 'Disabled',
-  jobId: null, timer: null, job: null, running: false, encKind: 'boss',
+  jobId: null, timer: null, job: null, running: false, encKind: 'boss', encMap: '全部',
   mode: 'single', cmpCards: [], lastJob: null,
   startingRelics: {},
   // 遗物计数器（从存档读来的实际数字）：{ RELIC_ID: { ints:[{name,value}], bools:[...] } }
@@ -219,7 +219,7 @@ function saveLocal() {
       localStorage.setItem(STORE_KEY, JSON.stringify({
         v: 1,
         deck: state.deck, relics: state.relics, potions: state.potions, relicProps: state.relicProps,
-        character: state.character, encounter: state.encounter, encKind: state.encKind,
+        character: state.character, encounter: state.encounter, encKind: state.encKind, encMap: state.encMap || '全部',
         hp: state.hp, maxHp: state.maxHp, ascension: state.ascension, actIndex: state.actIndex,
         gameMode: state.gameMode, dreadBoss: state.dreadBoss,
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
@@ -255,6 +255,7 @@ function loadLocal() {
   if (s.character) state.character = s.character;
   if (s.encounter) state.encounter = s.encounter;
   if (s.encKind) state.encKind = s.encKind;
+  if (s.encMap) state.encMap = s.encMap;
   if (Number.isFinite(s.hp)) state.hp = s.hp;
   if (Number.isFinite(s.maxHp)) state.maxHp = s.maxHp;
   if (Number.isFinite(s.ascension)) state.ascension = s.ascension;
@@ -1142,11 +1143,13 @@ function encLink(id, name) {
 
 /* 三个模式共用一套「遭遇 + 排队」面板：同一份内容、同一套 id 规则，只是挂在不同容器里 */
 const ENC_IDS = {
-  single: { search: 'encSearch', tabs: 'encTabs', list: 'encList', qAdd: 'qAdd', qRun: 'qRun', qClear: 'qClear', qList: 'qList', qResult: 'qResult' },
-  compare: { search: 'cmpEncSearch', tabs: 'cmpEncTabs', list: 'cmpEncList', qAdd: 'cmpQAdd', qRun: 'cmpQRun', qClear: 'cmpQClear', qList: 'cmpQList', qResult: 'cmpQResult' },
-  upgrade: { search: 'upEncSearch', tabs: 'upEncTabs', list: 'upEncList', qAdd: 'upQAdd', qRun: 'upQRun', qClear: 'upQClear', qList: 'upQList', qResult: 'upQResult' },
+  single: { search: 'encSearch', mapTabs: 'encMapTabs', tabs: 'encTabs', list: 'encList', qAdd: 'qAdd', qRun: 'qRun', qClear: 'qClear', qList: 'qList', qResult: 'qResult' },
+  compare: { search: 'cmpEncSearch', mapTabs: 'cmpEncMapTabs', tabs: 'cmpEncTabs', list: 'cmpEncList', qAdd: 'cmpQAdd', qRun: 'cmpQRun', qClear: 'cmpQClear', qList: 'cmpQList', qResult: 'cmpQResult' },
+  upgrade: { search: 'upEncSearch', mapTabs: 'upEncMapTabs', tabs: 'upEncTabs', list: 'upEncList', qAdd: 'upQAdd', qRun: 'upQRun', qClear: 'upQClear', qList: 'upQList', qResult: 'upQResult' },
 };
-const ENC_KINDS = [['boss', 'Boss'], ['elite', '精英'], ['normal', '普通'], ['weak', '弱怪'], ['event', '事件']];
+/* 先选地图（四张图 + 全部 + 事件），再选怪的种类 */
+const ENC_MAPS = ['全部', '密林', '暗巷', '巢穴', '荣耀', '事件'];
+const ENC_KINDS = [['weak', '弱怪'], ['normal', '普通'], ['elite', '精英'], ['boss', 'Boss'], ['event', '事件']];
 const ENC_MOUNTED = {};   // mode -> root element
 
 function mountEncPanel(rootSel, mode) {
@@ -1155,6 +1158,9 @@ function mountEncPanel(rootSel, mode) {
   const id = ENC_IDS[mode];
   root.innerHTML = `
     <div class="panel-head"><h3>遭遇</h3><input id="${id.search}" type="search" placeholder="搜索怪物"></div>
+    <div class="tabs map-tabs" id="${id.mapTabs}">
+      ${ENC_MAPS.map(m => `<button data-map="${m}"${m === (state.encMap || '全部') ? ' class="active"' : ''}>${m}</button>`).join('')}
+    </div>
     <div class="tabs" id="${id.tabs}">
       ${ENC_KINDS.map(([k, label]) => `<button data-kind="${k}"${k === state.encKind ? ' class="active"' : ''}>${label}</button>`).join('')}
     </div>
@@ -1171,6 +1177,14 @@ function mountEncPanel(rootSel, mode) {
     const b = e.target.closest('button[data-kind]');
     if (!b) return;
     state.encKind = b.dataset.kind;
+    renderEncLists();
+  };
+  const mapTabs = $('#' + id.mapTabs);
+  if (mapTabs) mapTabs.onclick = e => {
+    const b = e.target.closest('button[data-map]');
+    if (!b) return;
+    state.encMap = b.dataset.map;
+    saveLocal();
     renderEncLists();
   };
   const search = $('#' + id.search);
@@ -1194,6 +1208,7 @@ function mountEncPanel(rootSel, mode) {
 function renderEncLists() {
   const q = String(state.encQ || '').trim().toLowerCase();
   const list = state.meta.encounters.filter(e => e.kind === state.encKind
+    && ((state.encMap || '全部') === '全部' || (e.map || '事件') === state.encMap)
     && (!q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q)));
   for (const [mode, root] of Object.entries(ENC_MOUNTED)) {
     const id = ENC_IDS[mode];
@@ -1214,6 +1229,8 @@ function renderEncLists() {
     };
     const tabs = $('#' + id.tabs);
     if (tabs) $$('#' + id.tabs + ' button').forEach(x => x.classList.toggle('active', x.dataset.kind === state.encKind));
+    const mt = $('#' + id.mapTabs);
+    if (mt) $$('#' + id.mapTabs + ' button').forEach(x => x.classList.toggle('active', (x.dataset.map || '全部') === (state.encMap || '全部')));
     const s = $('#' + id.search);
     if (s && s.value !== (state.encQ || '')) s.value = state.encQ || '';
   }
@@ -1381,16 +1398,39 @@ function turnHistBlock(summary) {
 }
 
 /** 对比卡里的紧凑分析：每局打出 / 每次伤害 / 结束回合分布 / 剩能量 / 常打的牌 */
-function cmpAnalysisMini(s) {
+/* 某张牌在这套里每局打出几次（plays 里按 cardId 找） */
+function playsOf(s, cardId) {
+  if (!s || !cardId) return null;
+  return (s.plays || []).find(p => p.cardId === cardId) || null;
+}
+function fmtPlay(n) {
+  if (n == null) return '0';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+/* 选中的那张牌：每局打出几次、跟基线比差多少、每次打多少伤害 */
+function cardPlaysLine(s, o) {
+  const cp = playsOf(s, o.cardId);
+  const cur = cp ? cp.avg : 0;
+  const bp = o.baseS ? playsOf(o.baseS, o.cardId) : null;
+  const base = bp ? bp.avg : 0;
+  const d = cur - base;
+  let dtxt = '';
+  if (o.baseS) dtxt = Math.abs(d) < 0.05 ? `（跟${o.baseLabel}一样）` : `（比${o.baseLabel} ${d > 0 ? '+' : '−'}${fmtPlay(Math.abs(d))}）`;
+  const dmg = cp && cp.perPlay != null ? ` · 每次 <b>${cp.perPlay.toFixed(1)}</b> 伤害` : '';
+  return `<div class="cardplays">${esc(o.name || cardName(o.cardId))} 每局打出 <b>${fmtPlay(cur)}</b> 次${dtxt}${dmg}</div>`;
+}
+function cmpAnalysisMini(s, o) {
+  const opts = o || {};
   if (!s) return '';
   const parts = [];
-  if (s.playsPerRun != null) parts.push(`每局打出 <b>${s.playsPerRun}</b> 张`);
+  if (s.playsPerRun != null) parts.push(`${opts.cardId ? '全卡组' : '每局打出'} <b>${s.playsPerRun}</b> 张`);
   if (s.attrTotal != null && s.playsTotal) parts.push(`每次 <b>${(s.attrTotal / s.playsTotal).toFixed(1)}</b> 伤害`);
   if (s.energyWastePerTurn != null) parts.push(`剩能量 <b>${s.energyWastePerTurn}</b>/回合`);
   const hist = (s.turnsHist || []).slice(0, 6).map(x => `${x.turns}回合×${x.runs}`).join(' · ');
   const top = (s.plays || []).slice(0, 3).map(p => `${cardName(p.cardId)} ${p.total}`).join(' · ');
   if (!parts.length && !hist && !top) return '';
   return `<div class="cmp-mini2">
+    ${opts.cardId ? cardPlaysLine(s, opts) : ''}
     ${parts.length ? `<div>${parts.join(' · ')}</div>` : ''}
     ${hist ? `<div class="muted tiny">结束回合：${esc(hist)}</div>` : ''}
     ${top ? `<div class="muted tiny">常打的：${esc(top)}</div>` : ''}
@@ -1795,6 +1835,9 @@ function renderCompare(job, opts) {
   const box = $(o.container || '#cmpResult');
   const base = job.variants[0];
   const bs = base.summary || {};
+  // 只选了一张牌时，基线那张卡也把「每局几次」写出来，方便直接对数字
+  const candIds = [...new Set(job.variants.slice(1).map(v => v.card && v.card.cardId).filter(Boolean))];
+  const baseCardId = candIds.length === 1 ? candIds[0] : null;
   const rows = job.variants.map((v, i) => {
     const s = v.summary || {};
     const isBase = i === 0;
@@ -1817,7 +1860,7 @@ function renderCompare(job, opts) {
         <span class="muted">${[s.avgTurns ? s.avgTurns + ' 回合' : '', s.runs ? (s.wins ?? 0) + '/' + s.runs + ' 局' : ''].filter(Boolean).join(' · ')}</span>
       </div>
       ${s.attribution && s.attribution.length ? attrBlock(s.attribution, '伤害归因', { compact: true, size: 118, max: 5 }) : ''}
-      ${cmpAnalysisMini(s)}
+      ${cmpAnalysisMini(s, isBase ? (baseCardId ? { cardId: baseCardId } : null) : { cardId: v.card && v.card.cardId, baseS: bs, baseLabel: o.cardBaseLabel || '不放这张' })}
     </div>`;
   }).join('');
 
@@ -1953,7 +1996,7 @@ async function runUpgrade() {
     await pollJob(j.id, job => {
       const p = $('#upProgress');
       if (p) p.textContent = `${job.done}/${job.total} · ${job.elapsedSec || 0}s`;
-      if (job.status === 'done') renderCompare(job, { container: '#upResult', baseLabel: '基线（不升级）', verb: '该升', prefix: '升级 ' });
+      if (job.status === 'done') renderCompare(job, { container: '#upResult', baseLabel: '基线（不升级）', cardBaseLabel: '不升级', verb: '该升', prefix: '升级 ' });
     });
   } catch (e) {
     $('#upResult').innerHTML = `<div class="empty" style="color:#e74c3c">${esc(e.message)}</div>`;
@@ -2062,7 +2105,7 @@ function renderRest(job) {
         <span class="muted">血 ${v.hp}/${v.maxHp}</span>
       </div>
       ${s.attribution && s.attribution.length ? attrBlock(s.attribution, '伤害归因', { compact: true, size: 118, max: 5 }) : ''}
-      ${cmpAnalysisMini(s)}
+      ${cmpAnalysisMini(s, { cardId: (up.card && up.card.cardId) || (v.card && v.card.cardId), baseS: v === up ? rs : null, baseLabel: '不升级' })}
     </div>`;
   }).join('');
   const dwr = (rs.winrate || 0) - (us.winrate || 0);
@@ -2204,12 +2247,21 @@ async function runQueue(mode) {
       const baseV = cfg.base(job) || {};
       const s = baseV.summary || {};
       it.done = true; it.winrate = s.winrate; it.summary = s; it.status = '';
-      // 对比/升级还有「哪张最好、差多少」
+      // 对比/升级还有「哪张最好、差多少」，以及这张牌每局打出几次（这才是他要看的）
       if (mode !== 'single' && job.variants && job.variants.length > 1) {
-        const cands = job.variants.slice(1).map(v => ({ label: (v.card && cardName(v.card.cardId)) || v.label, s: v.summary || {} }));
+        const cands = job.variants.slice(1).map(v => ({ label: (v.card && cardName(v.card.cardId)) || v.label, cardId: v.card && v.card.cardId, s: v.summary || {} }));
         cands.sort((a, b) => (b.s.winrate || 0) - (a.s.winrate || 0) || ((a.s.avgHpLost ?? 999) - (b.s.avgHpLost ?? 999)));
         const best = cands[0];
-        it.best = best ? { label: best.label, dpp: ((best.s.winrate || 0) - (s.winrate || 0)) * 100, winrate: best.s.winrate } : null;
+        const bp = best ? playsOf(best.s, best.cardId) : null;
+        const bbase = best ? playsOf(s, best.cardId) : null;
+        it.best = best ? {
+          label: best.label,
+          cardId: best.cardId,
+          dpp: ((best.s.winrate || 0) - (s.winrate || 0)) * 100,
+          winrate: best.s.winrate,
+          plays: bp ? bp.avg : null,
+          basePlays: bbase ? bbase.avg : 0,
+        } : null;
       }
       renderQueue(mode); renderQueueResults(mode);
     } catch (e) {
@@ -2230,7 +2282,7 @@ function renderQueueResults(mode) {
   if (!done.length) { box.innerHTML = ''; return; }
   const head = mode === 'single'
     ? '<tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr>'
-    : '<tr><th>遭遇</th><th>基线胜率</th><th>最好的</th><th>战损</th><th>回合</th><th>每局打出</th></tr>';
+    : '<tr><th>遭遇</th><th>基线胜率</th><th>最好的</th><th>战损</th><th>回合</th><th>这张牌每局</th></tr>';
   const rows = done.map(it => {
     const s = it.summary;
     const common = `<td>${encLink(it.enc, qName(it.enc))}</td>
@@ -2248,7 +2300,7 @@ function renderQueueResults(mode) {
       <td class="num">${b ? `${esc(b.label)} <span class="${b.dpp > 0 ? 'up' : b.dpp < 0 ? 'down' : 'same'}">${b.dpp > 0 ? '+' : ''}${b.dpp.toFixed(1)}pp</span>` : '—'}</td>
       <td class="num">${hpRangeText(s)}</td>
       <td class="num">${s.avgTurns != null ? s.avgTurns : '—'}</td>
-      <td class="num">${s.playsPerRun != null ? s.playsPerRun : '—'}</td>
+      <td class="num">${b && b.plays != null ? `${fmtPlay(b.plays)} 次<span class="muted tiny">（基线 ${fmtPlay(b.basePlays)}）</span>` : '—'}</td>
     </tr>`;
   }).join('');
   box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;

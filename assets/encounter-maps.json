@@ -1,0 +1,366 @@
+{
+ "LAGAVULIN_MATRIARCH_BOSS": {
+  "map": "暗巷",
+  "kind": "boss"
+ },
+ "CEREMONIAL_BEAST_BOSS": {
+  "map": "密林",
+  "kind": "boss"
+ },
+ "THE_KIN_BOSS": {
+  "map": "密林",
+  "kind": "boss"
+ },
+ "VANTOM_BOSS": {
+  "map": "密林",
+  "kind": "boss"
+ },
+ "QUEEN_BOSS": {
+  "map": "荣耀",
+  "kind": "boss"
+ },
+ "TEST_SUBJECT_BOSS": {
+  "map": "荣耀",
+  "kind": "boss"
+ },
+ "KAISER_CRAB_BOSS": {
+  "map": "巢穴",
+  "kind": "boss"
+ },
+ "THE_INSATIABLE_BOSS": {
+  "map": "巢穴",
+  "kind": "boss"
+ },
+ "AEONGLASS_BOSS": {
+  "map": "荣耀",
+  "kind": "boss"
+ },
+ "WATERFALL_GIANT_BOSS": {
+  "map": "暗巷",
+  "kind": "boss"
+ },
+ "SOUL_FYSH_BOSS": {
+  "map": "暗巷",
+  "kind": "boss"
+ },
+ "KNOWLEDGE_DEMON_BOSS": {
+  "map": "巢穴",
+  "kind": "boss"
+ },
+ "BYRDONIS_ELITE": {
+  "map": "密林",
+  "kind": "elite"
+ },
+ "PHROG_PARASITE_ELITE": {
+  "map": "密林",
+  "kind": "elite"
+ },
+ "INFESTED_PRISMS_ELITE": {
+  "map": "巢穴",
+  "kind": "elite"
+ },
+ "BYGONE_EFFIGY_ELITE": {
+  "map": "密林",
+  "kind": "elite"
+ },
+ "MECHA_KNIGHT_ELITE": {
+  "map": "荣耀",
+  "kind": "elite"
+ },
+ "DECIMILLIPEDE_ELITE": {
+  "map": "巢穴",
+  "kind": "elite"
+ },
+ "SOUL_NEXUS_ELITE": {
+  "map": "荣耀",
+  "kind": "elite"
+ },
+ "PHANTASMAL_GARDENERS_ELITE": {
+  "map": "暗巷",
+  "kind": "elite"
+ },
+ "ENTOMANCER_ELITE": {
+  "map": "巢穴",
+  "kind": "elite"
+ },
+ "TERROR_EEL_ELITE": {
+  "map": "暗巷",
+  "kind": "elite"
+ },
+ "KNIGHTS_ELITE": {
+  "map": "荣耀",
+  "kind": "elite"
+ },
+ "SKULKING_COLONY_ELITE": {
+  "map": "暗巷",
+  "kind": "elite"
+ },
+ "GLOBE_HEAD_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "CONSTRUCT_MENAGERIE_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "SLIMES_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "CHOMPERS_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "MYTES_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "SEWER_CLAM_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "NIBBITS_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "FOSSIL_STALKER_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "BATTLEWORN_DUMMY_EVENT_V1_ENCOUNTER": {
+  "map": "事件",
+  "kind": "normal"
+ },
+ "BATTLEWORN_DUMMY_EVENT_V2_ENCOUNTER": {
+  "map": "事件",
+  "kind": "normal"
+ },
+ "BATTLEWORN_DUMMY_EVENT_V3_ENCOUNTER": {
+  "map": "事件",
+  "kind": "normal"
+ },
+ "TWO_TAILED_RATS_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "SLIMED_BERSERKER_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "TUNNELER_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "INKLETS_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "THE_LOST_AND_FORGOTTEN_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "SNAPPING_JAXFRUIT_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "OVERGROWTH_CRAWLERS": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "OVERGROWTH_WILDLIFE": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "AXEBOTS_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "HAUNTED_SHIP_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "SLITHERING_STRANGLER_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "PUNCH_CONSTRUCT_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "CUBEX_CONSTRUCT_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "SEAPUNK_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "SPINY_TOAD_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "SLUMBERING_BEETLE_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "HUNTER_KILLER_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "OWL_MAGISTRATE_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "BOWLBUGS_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "OVICOPTER_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "FLYCONID_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "GREMLIN_MERC_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "RUBY_RAIDERS_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "FABRICATOR_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "THE_OBSCURA_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "VINE_SHAMBLER_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "LOUSE_PROGENITOR_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "MAWLER_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "SCROLLS_OF_BITING_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "CORPSE_SLUGS_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "EXOSKELETONS_NORMAL": {
+  "map": "巢穴",
+  "kind": "normal"
+ },
+ "LIVING_FOG_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "CULTISTS_NORMAL": {
+  "map": "暗巷",
+  "kind": "normal"
+ },
+ "FOGMOG_NORMAL": {
+  "map": "密林",
+  "kind": "normal"
+ },
+ "FROG_KNIGHT_NORMAL": {
+  "map": "荣耀",
+  "kind": "normal"
+ },
+ "CORPSE_SLUGS_WEAK": {
+  "map": "暗巷",
+  "kind": "weak"
+ },
+ "NIBBITS_WEAK": {
+  "map": "密林",
+  "kind": "weak"
+ },
+ "SLIMES_WEAK": {
+  "map": "密林",
+  "kind": "weak"
+ },
+ "THIEVING_HOPPER_WEAK": {
+  "map": "巢穴",
+  "kind": "weak"
+ },
+ "SCROLLS_OF_BITING_WEAK": {
+  "map": "荣耀",
+  "kind": "weak"
+ },
+ "TUNNELER_WEAK": {
+  "map": "巢穴",
+  "kind": "weak"
+ },
+ "EXOSKELETONS_WEAK": {
+  "map": "巢穴",
+  "kind": "weak"
+ },
+ "FUZZY_WURM_CRAWLER_WEAK": {
+  "map": "密林",
+  "kind": "weak"
+ },
+ "SEAPUNK_WEAK": {
+  "map": "暗巷",
+  "kind": "weak"
+ },
+ "SLUDGE_SPINNER_WEAK": {
+  "map": "暗巷",
+  "kind": "weak"
+ },
+ "BOWLBUGS_WEAK": {
+  "map": "巢穴",
+  "kind": "weak"
+ },
+ "SHRINKER_BEETLE_WEAK": {
+  "map": "密林",
+  "kind": "weak"
+ },
+ "DEVOTED_SCULPTOR_WEAK": {
+  "map": "荣耀",
+  "kind": "weak"
+ },
+ "TOADPOLES_WEAK": {
+  "map": "暗巷",
+  "kind": "weak"
+ },
+ "FLYCONID_WEAK": {
+  "map": "密林",
+  "kind": "weak"
+ },
+ "TURRET_OPERATOR_WEAK": {
+  "map": "荣耀",
+  "kind": "weak"
+ },
+ "FAKE_MERCHANT_EVENT_ENCOUNTER": {
+  "map": "事件",
+  "kind": "event"
+ },
+ "THE_ARCHITECT_EVENT_ENCOUNTER": {
+  "map": "事件",
+  "kind": "event"
+ },
+ "DENSE_VEGETATION_EVENT_ENCOUNTER": {
+  "map": "事件",
+  "kind": "event"
+ },
+ "PUNCH_OFF_EVENT_ENCOUNTER": {
+  "map": "事件",
+  "kind": "event"
+ },
+ "MYSTERIOUS_KNIGHT_EVENT_ENCOUNTER": {
+  "map": "事件",
+  "kind": "event"
+ }
+}

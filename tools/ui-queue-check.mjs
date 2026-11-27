@@ -80,7 +80,7 @@ try {
 
   // ---------- 1) 外链 ----------
   const links = await evaluate(`(() => {
-    const items = [...document.querySelectorAll('#encList .enc-item')];
+    const items = [...document.querySelectorAll('#encList .enc-item[data-id]')];
     const ext = items.map(it => ({ name: (it.querySelector('span')||{}).textContent || '', href: (it.querySelector('.enc-ext')||{}).href || '', id: it.dataset.id }));
     return { n: items.length, links: ext.slice(0, 4), withLink: ext.filter(x => x.href).length, all: ext.map(x => x.href).filter(Boolean) };
   })()`);
@@ -236,7 +236,7 @@ try {
   const cmpPanel = await evaluate(`(async () => {
     document.querySelector('[data-mode=compare]').click();
     await new Promise(r => setTimeout(r, 400));
-    const items = document.querySelectorAll('#cmpEncList .enc-item').length;
+    const items = document.querySelectorAll('#cmpEncList .enc-item[data-id]').length;
     const links = document.querySelectorAll('#cmpEncList .enc-ext').length;
     const tabs = document.querySelectorAll('#cmpEncTabs button').length;
     document.querySelector('#cmpQAdd').click();
@@ -249,7 +249,7 @@ try {
   const upPanel = await evaluate(`(async () => {
     document.querySelector('[data-mode=upgrade]').click();
     await new Promise(r => setTimeout(r, 400));
-    const items = document.querySelectorAll('#upEncList .enc-item').length;
+    const items = document.querySelectorAll('#upEncList .enc-item[data-id]').length;
     const links = document.querySelectorAll('#upEncList .enc-ext').length;
     document.querySelector('#upQAdd').click();
     const q = document.querySelectorAll('#upQList .q-item').length;
@@ -278,7 +278,7 @@ try {
       first: (document.querySelector('#cmpQResult tbody tr') || {}).textContent || '' };
   })()`);
   ok(cmpQueue.rows === 1, '对比模式的排队真跑完了并出了表', `${cmpQueue.rows} 行`);
-  ok(cmpQueue.head.includes('基线胜率') && cmpQueue.head.includes('最好的'), '对比排队表多列「基线胜率 / 最好的」', cmpQueue.head.join(' / '));
+  ok(cmpQueue.head.includes('胜率（用这张后）') && cmpQueue.head.includes('最好的'), '对比排队表多列「基线胜率 / 最好的」', cmpQueue.head.join(' / '));
 
   const restLabel = await evaluate(`(() => {
     document.querySelector('[data-mode=rest]').click();

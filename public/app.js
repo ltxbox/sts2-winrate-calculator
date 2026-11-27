@@ -203,14 +203,15 @@ function bindDeckSplit() {
 }
 
 function qStore(q) {
-  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, group: it.group || null, groupLabel: it.groupLabel || null, rows: it.rows ? it.rows.slice(0, 60) : null, report: it.report || null }));
+  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, est: it.est || null, estSummary: it.estSummary || null, cardPlays: it.cardPlays == null ? null : it.cardPlays, baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null }));
 }
 function qRestore(list) {
   if (!Array.isArray(list)) return [];
-  return list.filter(it => it && it.enc).map(it => ({
+  return list.filter(it => it && it.enc && !String(it.enc).startsWith('__GROUP')).map(it => ({
     enc: it.enc, done: !!it.done, running: false,
     winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, status: '',
-    group: it.group || null, groupLabel: it.groupLabel || null, rows: it.rows || null, report: it.report || null,
+    est: it.est || null, estSummary: it.estSummary || null, cardPlays: it.cardPlays == null ? null : it.cardPlays,
+    baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null,
   }));
 }
 function saveLocal() {
@@ -1221,10 +1222,12 @@ function renderEncLists() {
     if (!box) continue;
     const map = state.encMap || '全部';
     // 名单压缩：地图不是「全部/事件」时，把这一类的全部怪合成一行
-    const groupRow = (!q && map !== '全部' && map !== '事件') ? Object.entries(GROUP_KINDS).map(([k, label]) => {
-      const n = state.meta.encounters.filter(e => e.kind === k && (e.map || '事件') === map).length;
+    // 「全部地图」下也放这四行（范围=所有地图），选了具体地图则只算这张图
+    const groupRow = (!q && map !== '事件') ? Object.entries(GROUP_KINDS).map(([k, label]) => {
+      const n = state.meta.encounters.filter(e => e.kind === k && (map === '全部' || (e.map || '事件') === map)).length;
       if (!n) return '';
-      return `<div class="enc-item group ${(state.encGroups || []).includes(k) ? 'active' : ''}" data-group="${k}" title="把${map}的 ${n} 只${label.replace('全部', '')}一次排进队，每只按上面的样本数跑，跑完出一张战损数据图">
+      const scope = map === '全部' ? '全部地图' : map;
+      return `<div class="enc-item group ${(state.encGroups || []).includes(k) ? 'active' : ''}" data-group="${k}" title="把${scope}的 ${n} 只${label.replace('全部', '')}一次排进队，每只按上面的样本数跑，跑完出一张战损数据图">
         <span>▣ ${esc(label)}</span><span class="gcount">${n} 只</span>
       </div>`;
     }).join('') : '';
@@ -2169,7 +2172,8 @@ function groupIds(kind) {
 }
 function qGroupLabel(id) {
   const kind = String(id || '').slice(GROUP_PREFIX.length);
-  return `${state.encMap || '全部'} · ${GROUP_KINDS[kind] || '全部'}`;
+  const scope = (state.encMap || '全部') === '全部' ? '全部地图' : state.encMap;
+  return `${scope} · ${GROUP_KINDS[kind] || '全部'}`;
 }
 function renderQueue(mode) {
   const id = ENC_IDS[mode];
@@ -2178,12 +2182,12 @@ function renderQueue(mode) {
   if (!box) return;
   const q = qArr(mode);
   if (!q.length) {
-    box.innerHTML = '<div class="muted tiny">从上面点怪物、点「+ 加入」；也可以直接加「全部弱怪 / 全部普通怪 / 全部精英 / 全部Boss」，跑完会生成一张战损数据图。</div>';
+    box.innerHTML = '<div class="muted tiny">上面 ▣ 全部弱怪 / 全部普通怪 / 全部精英 / 全部Boss 可以多选（选具体地图就只算那张图），点了再按「开始测算 / 开始排队」，跑完生成一张战损数据图。单只怪也能正常排队。</div>';
   } else {
     box.innerHTML = q.map((it, i) => `<div class="q-item${it.running ? ' run' : ''}${it.done ? ' done' : ''}" data-i="${i}">
       <span class="q-idx">${i + 1}</span>
-      <span class="q-name" title="${esc(it.status || '')}">${it.group ? esc(it.groupLabel || qGroupLabel(it.enc)) : encLink(it.enc, qName(it.enc))}${it.group ? ` <span class="muted tiny">${it.group.length} 只</span>` : ''}</span>
-      <span class="q-st">${it.running ? '算着…' : it.done ? (it.winrate == null ? '完了' : `${(it.winrate * 100).toFixed(1)}%`) : '等着'}</span>
+      <span class="q-name" title="${esc(it.status || '')}">${it.est ? `<span class="muted tiny">▣ ${esc(it.est.group)}</span> ` : ''}${encLink(it.enc, qName(it.enc))}</span>
+      <span class="q-st">${it.running ? '算着…' : it.done ? (it.winrate == null ? '完了' : `${((it.est && it.estSummary ? it.estSummary.winrate : it.winrate) * 100).toFixed(1)}%`) : '等着'}</span>
       <button class="ghost small" data-qdel="${i}" title="从队列里去掉（正在算的那只先点「■ 终止」）">×</button>
     </div>`).join('');
   }
@@ -2219,13 +2223,19 @@ function qHint(mode, text) {
 function addToQueue(mode) {
   const groups = (state.encGroups || []).slice();
   if (groups.length) {
-    // 选了几组就排几组（已经排在队里还没跑的不重复加）
+    // 「全部弱怪」这类不是一只怪：把组里每只怪各排一行（跟手动排 5 只一样），跑完再合一张数据图
+    const map = state.encMap || '全部';
     for (const k of groups) {
       const ids = groupIds(k);
       if (!ids.length) continue;
-      const label = `${state.encMap || '全部'} · ${GROUP_KINDS[k] || '全部'}`;
-      if (qArr(mode).some(it => it.group && it.groupLabel === label && !it.done)) continue;
-      qArr(mode).push({ enc: '__GROUP', group: ids, groupLabel: label, done: false, running: false, winrate: null });
+      const label = `${map === '全部' ? '全部地图' : map} · ${GROUP_KINDS[k] || '全部'}`;
+      ids.forEach((id, idx) => {
+        if (qArr(mode).some(it => !it.done && it.enc === id && it.est && it.est.group === label)) return;
+        qArr(mode).push({
+          enc: id, est: { group: label, kind: k, map, idx, total: ids.length },
+          done: false, running: false, winrate: null,
+        });
+      });
     }
     saveLocal(); renderQueue(mode);
     return;
@@ -2269,37 +2279,44 @@ const QUEUE_RUN = {
   compare: { url: '/api/compare', body: cmpPayload, base: job => job.variants[0] },
   upgrade: { url: '/api/upgrade3', body: upgPayload, base: job => job.variants[0] },
 };
-/* 一组怪跑完：每只的胜率/战损/回合 + 选中那张牌的次数，交给服务端出一张数据图 */
-function estimateRowFrom(job, enc, mode) {
-  const v = (job.variants || [])[0] || {};
-  const s = v.summary || {};
-  let cardPlays = null;
-  if (mode !== 'single' && job.variants && job.variants.length > 1) {
-    const cand = job.variants[1];
-    const id = cand && cand.card && cand.card.cardId;
-    const p = id ? playsOf(cand.summary || {}, id) : null;
-    cardPlays = p ? p.avg : null;
+/* 一组怪都跑完：把每只的胜率/战损/回合 + 选中那张牌的次数合成一张数据图（服务端出 HTML） */
+async function maybeBuildEstimate(mode) {
+  const q = qArr(mode);
+  const labels = [...new Set(q.filter(it => it.est && it.done).map(it => it.est.group))];
+  for (const g of labels) {
+    const items = q.filter(it => it.est && it.est.group === g);
+    const allDone = items.length && items.every(it => it.done && it.estSummary);
+    if (!allDone || items.some(it => it.report)) continue;
+    const rows = items.map(it => {
+      const s = it.estSummary || {};
+      return {
+        enc: it.enc, name: qName(it.enc), winrate: s.winrate,
+        avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
+        avgTurns: s.avgTurns, cardPlays: it.cardPlays == null ? null : it.cardPlays,
+        baseWinrate: it.baseWinrate == null ? null : it.baseWinrate,
+      };
+    });
+    const it0 = items[0];
+    const cands = mode === 'compare'
+      ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
+      : mode === 'upgrade'
+        ? state.upPicks.map(i => cardName(state.deck[i] && state.deck[i].cardId)).join(' / ')
+        : '';
+    const report = await saveEstimateReport({
+      title: `单卡战损预估 · ${g}`, label: g, mode,
+      map: (it0.est && it0.est.map) || state.encMap,
+      kind: GROUP_KINDS[(it0.est && it0.est.kind)] || '',
+      candidate: cands, count: state.count, rows,
+    });
+    items[items.length - 1].report = report;
+    saveLocal();
   }
-  return {
-    enc, name: qName(enc), winrate: s.winrate,
-    avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
-    avgTurns: s.avgTurns, cardPlays,
-  };
 }
-async function saveEstimateReport(it, mode) {
-  const cands = mode === 'compare'
-    ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
-    : mode === 'upgrade'
-      ? state.upPicks.map(i => cardName(state.deck[i] && state.deck[i].cardId)).join(' / ')
-      : '';
-  const title = `单卡战损预估 · ${it.groupLabel || '一组怪'}`;
+async function saveEstimateReport(payload) {
   try {
     const r = await fetch('/api/estimate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title, map: state.encMap, kind: (it.groupLabel || '').split('·').pop().trim(),
-        candidate: cands, mode, count: state.count, rows: it.rows || [],
-      }),
+      body: JSON.stringify(payload),
     });
     const j = await r.json();
     return r.ok && j.ok ? j : null;
@@ -2328,39 +2345,7 @@ async function runQueue(mode) {
     if (it.done) continue;
     it.running = true; renderQueue(mode);
     try {
-      /* ---- 名单压缩：一组怪，每只 1 场，跑完出数据图 ---- */
-      if (it.group && it.group.length) {
-        const rows = [];
-        const total = it.group.length;
-        for (let k = 0; k < total; k++) {
-          const sub = it.group[k];
-          it.status = `${k + 1}/${total} · ${qName(sub)}`; renderQueue(mode);
-          const body = cfg.body(sub);
-          // 场数就按上面「样本数」来，不写死；跑多少场由用户决定
-          const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error || '提交失败');
-          const job = await pollJob(j.id, jb => {
-            if (jb) { it.status = `${k + 1}/${total} · ${jb.done}/${jb.total}`; renderQueue(mode); }
-            if (jb && jb.status === 'cancelled') stopped = true;
-          });
-          if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; it.running = false; renderQueue(mode); break; }
-          rows.push(estimateRowFrom(job, sub, mode));
-        }
-        if (stopped) { it.running = false; renderQueue(mode); break; }
-        it.rows = rows;
-        it.done = true; it.running = false; it.status = `${rows.length}/${total} 只`;
-        it.winrate = rows.length ? rows.reduce((a, b) => a + (b.winrate || 0), 0) / rows.length : null;
-        it.summary = {
-          winrate: it.winrate,
-          avgHpLost: rows.length ? rows.reduce((a, b) => a + (b.avgHpLost || 0), 0) / rows.length : null,
-          avgTurns: rows.length ? rows.reduce((a, b) => a + (b.avgTurns || 0), 0) / rows.length : null,
-        };
-        it.report = await saveEstimateReport(it, mode);
-        renderQueue(mode); renderQueueResults(mode);
-        continue;
-      }
-      /* ---- 单只怪 ---- */
+      /* ---- 单只怪（整组怪也是这么一只一只排进来的） ---- */
       const body = cfg.body(it.enc);
       const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json();
@@ -2390,6 +2375,16 @@ async function runQueue(mode) {
           basePlays: bbase ? bbase.avg : 0,
         } : null;
       }
+      // 组里的一只怪：对比/升级模式下要报「用了这张牌」那一路的数，不是不放这张牌的基线
+      if (it.est) {
+        const cand = (mode !== 'single' && job.variants && job.variants.length > 1) ? job.variants[1] : null;
+        it.estSummary = cand ? (cand.summary || {}) : s;
+        it.baseWinrate = cand ? s.winrate : null;
+        const cid = cand && cand.card && cand.card.cardId;
+        const cp = cid ? playsOf(it.estSummary, cid) : null;
+        it.cardPlays = cp ? cp.avg : null;
+        await maybeBuildEstimate(mode);
+      }
       renderQueue(mode); renderQueueResults(mode);
     } catch (e) {
       it.running = false; it.status = '失败：' + e.message; it.error = e.message;
@@ -2409,21 +2404,12 @@ function renderQueueResults(mode) {
   if (!done.length) { box.innerHTML = ''; return; }
   const head = mode === 'single'
     ? '<tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr>'
-    : '<tr><th>遭遇</th><th>基线胜率</th><th>最好的</th><th>战损</th><th>回合</th><th>这张牌每局</th></tr>';
+    : '<tr><th>遭遇</th><th>胜率（用这张后）</th><th>最好的</th><th>战损</th><th>回合</th><th>这张牌每局</th></tr>';
   const rows = done.map(it => {
-    const s = it.summary;
-    /* 一组怪（全部弱怪…）：排一行汇总，明细看数据图 */
-    if (it.group) {
-      const link = it.report ? `<a class="q-report-link" href="${it.report.url}" target="_blank" rel="noreferrer noopener" title="打开这张战损数据图（每只怪的掉血/胜率）">数据图 ↗</a>` : '—';
-      return `<tr class="q-group-row">
-        <td>${esc(it.groupLabel || '一组怪')}<span class="muted tiny"> ${it.group.length} 只</span></td>
-        <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b><span class="muted tiny"> 平均</span></td>
-        <td class="num" colspan="2">平均战损 ${(s.avgHpLost ?? 0).toFixed(1)}</td>
-        <td class="num">${s.avgTurns != null ? s.avgTurns + ' 回合' : '—'}</td>
-        <td class="num">${link}</td>
-      </tr>`;
-    }
-    const common = `<td>${encLink(it.enc, qName(it.enc))}</td>
+    /* 组里的一只怪：对比/升级模式报的是「用了这张牌」那一路，不是基线 */
+    const s = (it.est && it.estSummary) ? it.estSummary : it.summary;
+    const rep = it.report ? ` <a class="q-report-link" href="${it.report.url}" target="_blank" rel="noreferrer noopener" title="打开这组怪的战损数据图">数据图 ↗</a>` : '';
+    const common = `<td>${encLink(it.enc, qName(it.enc))}${rep}</td>
       <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}</td>`;
     if (mode === 'single') {
       return `<tr>${common}

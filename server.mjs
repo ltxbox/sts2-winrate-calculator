@@ -640,6 +640,7 @@ function estimateHtml(d) {
       <td>${escHtml(r.name)}${lost ? ' <span class="lost">打不过</span>' : ''}</td>
       <td class="num">${lossTxt}<span class="muted">${range ? '（' + escHtml(range) + '）' : ''}</span></td>
       <td class="num" style="color:${wr >= 0.999 ? '#7fd6a0' : wr > 0 ? '#e0b070' : '#d76a6a'}">${(wr * 100).toFixed(0)}%</td>
+      ${cardCol ? `<td class="num muted">${r.baseWinrate == null ? '—' : (Number(r.baseWinrate) * 100).toFixed(0) + '%'}</td>` : ''}
       <td class="num">${r.avgTurns == null ? '—' : r.avgTurns}</td>
       ${cardCol ? `<td class="num">${r.cardPlays == null ? '—' : Number(r.cardPlays).toFixed(1)}</td>` : ''}
     </tr>`;
@@ -671,7 +672,7 @@ function estimateHtml(d) {
   <text x="0" y="${chartH + 20}" fill="#77849a" font-size="11">横条＝平均战损（掉血），右边数字＝胜率；绿色=全胜，黄色=常胜，红色=打不过</text>
   ${bars}
 </svg>
-<table><thead><tr><th>怪物</th><th>平均战损（区间）</th><th>胜率</th><th>回合</th>${d.mode && d.mode !== 'single' ? '<th>这张牌每局</th>' : ''}</tr></thead>
+<table><thead><tr><th>怪物</th><th>平均战损（区间）</th><th>胜率（用这张后）</th>${d.mode && d.mode !== 'single' ? '<th>基线胜率</th>' : ''}<th>回合</th>${d.mode && d.mode !== 'single' ? '<th>这张牌每局</th>' : ''}</tr></thead>
 <tbody>${table}</tbody></table>
 <div class="foot">每只怪按上方「样本数」跑 ${d.count || 1} 场；战损＝这些场次平均掉的血，「打不过」是没打过的那只（不算战损）。数据由包内 OfflineSearchHarness 现算。</div>
 </body></html>`;

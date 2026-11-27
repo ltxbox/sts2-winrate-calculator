@@ -61,7 +61,7 @@ try {
     return { active, items: [...document.querySelectorAll('#qList .q-item')].map(x => x.textContent.trim().replace(/\\s+/g, ' ')) };
   })()`);
   ok(multi.active === 2, '「全部弱怪」和「全部普通怪」能同时选', `${multi.active} 组`);
-  ok(multi.items.length === 2 && /全部弱怪/.test(multi.items[0]) && /全部普通怪/.test(multi.items[1]), '两组都进了排队', multi.items.join(' | '));
+  ok(multi.items.length === 18 && /小啃兽/.test(multi.items[0]) && /全部弱怪/.test(multi.items[0]) && /全部普通怪/.test(multi.items[17]), '两组=5+13 只，每只各排一行', `${multi.items.length} 行：${multi.items.slice(0, 2).join(' | ')} … ${multi.items[multi.items.length - 1]}`);
 
   // 只留弱怪那组，点「开始测算」→ 该组自动跑（测试里样本数设 1，省时间）
   const run = await ev(`(async () => {
@@ -88,7 +88,7 @@ try {
     };
   })()`);
   ok(run.href && /^\/api\/estimate\//.test(run.href), '跑完给了数据图链接', String(run.href));
-  ok(run.rows.some(r => /全部弱怪/.test(r) && /平均/.test(r)), '排队表里有一组怪的汇总行', run.rows.join(' / ').slice(0, 200));
+  ok(run.rows.length === 5, '排队表里 5 只怪各一行', `${run.rows.length} 行：${run.rows.join(' / ').slice(0, 160)}`);
 
   // 数据图文件本身：能打开、里面有每只怪的名字和战损
   const repUrl = new URL(run.href, BASE).toString();

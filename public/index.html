@@ -25,6 +25,7 @@
     </div>
     <label>种子前缀<input id="prefix" type="text" value="HISRUN"></label>
     <label>药水<select id="potionPolicy"><option value="Disabled">不用药</option><option value="Smart">智能用药</option></select></label>
+    <label>并行<select id="concurrency" title="同时跑几局。每个并行占一个常驻进程和一份内存。默认按物理核数（逻辑核 / 2）。机器卡、内存小就往下调；核多可以调高。实测这台 16 线程：8 最快，12 反而慢 27%。"></select></label>
   </div>
   <div class="runbox">
     <button id="run" class="primary">开始测算</button>
@@ -35,6 +36,32 @@
   </div>
 </header>
 <div id="diagBanner" class="diag-banner" style="display:none"></div>
+
+<div class="folderbar">
+  <span class="bar-label">结果文件夹</span>
+  <button id="folderPick" class="folder-btn" title="点这里一层一层挑文件夹（跟 Windows 一样），跑完自动归到这里；这里只能选，不能新建">
+    <span class="fi">📁</span><span id="folderText">未选择（不归类）</span><span class="car">▾</span>
+  </button>
+  <label class="chk tiny" title="打开时，会在选中的文件夹里再按卡组建一层：初始卡组 / 删2打 / 删1打1防 / 删2防…"><input type="checkbox" id="folderAuto" checked> 按卡组自动分子文件夹</label>
+  <span id="folderPreview" class="mini"></span>
+</div>
+
+<div id="folderModal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>选结果文件夹</b>
+      <span class="mini">点一行选中，再点「用这个文件夹」。这一页只能选，不能新建——文件夹在 8770 结果库里建</span>
+      <button id="folderClose" class="ghost small">关闭</button>
+    </div>
+    <div id="folderTree" class="ftree"></div>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button id="folderClear" class="ghost small">不用文件夹</button>
+      <button id="folderChoose" class="primary">用这个文件夹</button>
+    </div>
+  </div>
+</div>
+
 
 <nav class="modes" id="modes">
   <button data-mode="single" class="active">单场测算</button>
@@ -85,16 +112,22 @@
 
   <section class="panel mid-panel">
     <div class="panel-head"><h3>测算结果</h3><button id="csv" class="ghost small" disabled>导出 CSV</button></div>
-    <div id="resultHead" class="result-head">
-      <div class="big" id="winrate">—</div>
-      <div class="stat"><span id="progLabel">未开始</span></div>
+    <!-- 2026-11-27 22:2x 他说的「中间的没做滚动，下面内容看不到」：结果区整体放进一个滚动容器 -->
+    <div class="mid-body min-center" id="singleBody">
+      <div id="resumeBar" class="resume-bar hidden"></div>
+      <!-- 2026-11-28：数据不在中间显示，只留这一行（打开数据图 / 导出 CSV） -->
+      <div id="dataBar" class="data-bar hidden"></div>
+      <div id="resultHead" class="result-head">
+        <div class="big" id="winrate">—</div>
+        <div class="stat"><span id="progLabel">未开始</span></div>
+      </div>
+      <div id="resultStats" class="result-stats"></div>
+      <div id="singleAttr" class="attr-block"></div>
+      <div id="singlePlays" class="attr-block"></div>
+      <div id="singleTurns" class="attr-block"></div>
+      <div id="singleTurnHist" class="attr-block"></div>
+      <div id="resultList" class="result-list"></div>
     </div>
-    <div id="resultStats" class="result-stats"></div>
-    <div id="singleAttr" class="attr-block"></div>
-    <div id="singlePlays" class="attr-block"></div>
-    <div id="singleTurns" class="attr-block"></div>
-    <div id="singleTurnHist" class="attr-block"></div>
-    <div id="resultList" class="result-list"></div>
   </section>
 
 
@@ -113,9 +146,14 @@
         <option value="1">攻击</option><option value="2">技能</option><option value="3">能力</option>
       </select>
     </div>
+    <div class="panel-head pool-head">
+      <h3>最近选过</h3>
+      <select id="cmpRecentCh" title="按角色筛选最近选过的卡"><option value="">全部角色</option></select>
+      <button id="cmpRestoreLast" class="ghost small" title="从结果库里最近一次对比测试恢复那套卡">从上次恢复</button>
+      <button id="cmpRecentClear" class="ghost small">清空</button>
+    </div>
+    <div id="cmpRecent" class="recent-strip"></div>
     <div id="cmpPool" class="card-grid"></div>
-    <div class="panel-head pool-head"><h3>当前状态</h3></div>
-    <div id="cmpState" class="side-state"></div>
   </section>
 
   <section class="panel mid-panel">

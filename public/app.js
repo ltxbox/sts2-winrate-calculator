@@ -37,22 +37,47 @@ const state = {
   character: 'NECROBINDER',
   hp: 37, maxHp: 66, ascension: 10, actIndex: 0,
   gameMode: 'Standard', dreadBoss: '', dreadList: [], serverCaps: null,
-  count: 100, prefix: 'HISRUN', potionPolicy: 'Disabled',
+  count: 100, prefix: 'HISRUN', potionPolicy: 'Disabled', concurrency: 0,
   jobId: null, timer: null, job: null, running: false, encKind: 'boss', encMap: '全部', encGroups: [],
-  mode: 'single', cmpCards: [], lastJob: null,
+  mode: 'single', cmpCards: [], cmpRecent: [], lastJob: null,
   startingRelics: {},
   // 遗物计数器（从存档读来的实际数字）：{ RELIC_ID: { ints:[{name,value}], bools:[...] } }
   relicProps: {},
   restOpts: { pct: 30, base: 'max', pillow: false, furnace: false },
   // 中间「测算结果」栏收不收起来（收起后左栏变宽）；midAuto = 这次收起是开跑时自动做的，跑完要自动展开
   midCollapsed: false,
+  sidesCollapsed: false,
+  sidesAuto: false,
   midAuto: false,
   // 卡组列表高度（px，拖分隔线设的；0 = 用默认 42%）
   deckListH: 0,
+  // 结果文件夹（2026-11-28 他要的）：测试前选好，跑完自动归到 8770 的对应文件夹里。
+  // resultFolder = 选中的父文件夹；resultAuto = 再按卡组自动分一层子文件夹（初始卡组/删2打/…）
+  resultFolder: '', resultAuto: true,
 };
 
-/* 并发：按 CPU 核数取，16 核 -> 12（实测比 4 路快 1.74 倍） */
-const CONCURRENCY = Math.max(4, Math.min(12, (navigator.hardwareConcurrency || 8) - 2));
+/* 并发：默认按「物理核数」取（逻辑核数 / 2），用户可以在界面「并行」里手动改（存 localStorage）。
+   2026-11-28 实测（8 物理核 / 16 线程，弱怪 200 局）：并发 4 = 15.6 局/秒，8 = 17.3 局/秒，12 = 12.7 局/秒。 */
+const PHYSICAL_CORES = Math.max(2, Math.floor((navigator.hardwareConcurrency || 8) / 2));
+let CONCURRENCY_MAX = 16;
+let SERVER_CAPS = null;
+let CONCURRENCY = PHYSICAL_CORES;
+function applyConcurrency(n) {
+  const v = Number(n) || 0;
+  CONCURRENCY = v > 0 ? Math.max(1, Math.min(CONCURRENCY_MAX, Math.round(v))) : PHYSICAL_CORES;
+  return CONCURRENCY;
+}
+/* 问服务端这台机器能开多少并行（别人的机器更好就自动给更多选项） */
+async function loadCaps() {
+  try {
+    const r = await fetch('/api/caps');
+    if (!r.ok) return;
+    SERVER_CAPS = await r.json();
+    CONCURRENCY_MAX = Math.max(4, Math.min(64, Number(SERVER_CAPS.maxConcurrency) || CONCURRENCY_MAX));
+    applyConcurrency(state.concurrency);
+    renderConcurrencyPicker();
+  } catch { }
+}
 /* ---------- 本地记忆：关掉浏览器再打开还在 ---------- */
 const STORE_KEY = 'sts2-ui.v1';
 let _persistTimer = null;
@@ -115,14 +140,29 @@ function setMidProgress(text) {
   $$('.mid-prog').forEach(el => { el.textContent = text || ''; });
 }
 
-function applyMidCollapsed(collapsed) {
-  state.midCollapsed = !!collapsed;
-  $$('main.cols').forEach(m => m.classList.toggle('mid-collapsed', state.midCollapsed));
+/* 三个栏的「收/放」状态只在这里改 DOM，避免两边各改一遍出现「都收着」的死界面 */
+function syncCollapseUi() {
+  $$('main.cols').forEach(m => {
+    m.classList.toggle('mid-collapsed', state.midCollapsed);
+    m.classList.toggle('sides-collapsed', state.sidesCollapsed);
+  });
   midPanels().forEach(p => p.classList.toggle('is-collapsed', state.midCollapsed));
   $$('.mid-toggle').forEach(b => {
     b.textContent = state.midCollapsed ? '⟩' : '⟨';
     b.title = state.midCollapsed ? '展开结果栏（Alt+M）' : '收起结果栏，给左边腾地方（Alt+M）';
+    // 两边已经收起来了就别再收中间，否则屏幕上只剩一条竖条（2026-11-27 22:08 踩到的）
+    b.classList.toggle('hidden', state.sidesCollapsed);
   });
+  $$('.sides-toggle, .mq-fold').forEach(b => {
+    b.textContent = state.sidesCollapsed ? '⤡ 还原两边' : '⤢ 全宽';
+    b.title = state.sidesCollapsed ? '把卡组栏和遭遇栏放回来（Alt+S）' : '收起左右两边，全宽看结果（Alt+S）';
+  });
+}
+
+function applyMidCollapsed(collapsed) {
+  state.midCollapsed = !!collapsed;
+  if (state.midCollapsed && state.sidesCollapsed) { state.sidesCollapsed = false; state.sidesAuto = false; }
+  syncCollapseUi();
   if (!state.midCollapsed) setMidProgress('');
   saveLocal();
 }
@@ -139,6 +179,22 @@ function autoCollapseMid() {
 }
 function autoExpandMid() { if (state.midAuto) { state.midAuto = false; setMidCollapsed(false); } }
 
+/* ---------- 两边（卡组栏 / 遭遇栏）收起，中间全宽看结果 ----------
+   2026-11-27 22:05 他说的：「中间的空间只有跑完才有用，完全可以跑完了再把两边收起」。
+   手动切换在中间栏标题右边那个按钮（⤢ 全宽 / ⤡ 还原两边），Alt+S 也行；两边收着时中间不许再收。 */
+function applySidesCollapsed(collapsed) {
+  state.sidesCollapsed = !!collapsed;
+  if (state.sidesCollapsed && state.midCollapsed) { state.midCollapsed = false; state.midAuto = false; }
+  syncCollapseUi();
+  saveLocal();
+}
+function setSidesCollapsed(collapsed, auto) {
+  state.sidesAuto = auto ? !!collapsed : false;
+  applySidesCollapsed(collapsed);
+}
+function autoCollapseSides() { if (state.sidesCollapsed) return; setSidesCollapsed(true, true); }
+function autoExpandSides() { if (state.sidesAuto) { state.sidesAuto = false; setSidesCollapsed(false); } }
+
 function bindMidCollapse() {
   midPanels().forEach(panel => {
     const head = panel.querySelector('.panel-head');
@@ -149,6 +205,14 @@ function bindMidCollapse() {
       b.className = 'ghost small mid-toggle';
       b.onclick = e => { e.stopPropagation(); setMidCollapsed(!state.midCollapsed); };
       head.appendChild(b);
+    }
+    // 「⤢ 全宽 / ⤡ 还原两边」放栏头：比放在排队块里可靠——没排队的时候也点得到（2026-11-27 22:08 修的）
+    if (!head.querySelector('.sides-toggle')) {
+      const s2 = document.createElement('button');
+      s2.type = 'button';
+      s2.className = 'ghost small sides-toggle';
+      s2.onclick = e => { e.stopPropagation(); setSidesCollapsed(!state.sidesCollapsed); };
+      head.appendChild(s2);
     }
     if (!panel.querySelector('.mid-strip')) {
       const s = document.createElement('button');
@@ -165,8 +229,13 @@ function bindMidCollapse() {
       e.preventDefault();
       setMidCollapsed(!state.midCollapsed);
     }
+    if (e.altKey && !e.ctrlKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      setSidesCollapsed(!state.sidesCollapsed);
+    }
   });
   applyMidCollapsed(!!state.midCollapsed);
+  applySidesCollapsed(!!state.sidesCollapsed);
 }
 
 /* ---------- 卡组 / 卡池之间的分隔线：上下拖，改卡组占多高（双击回默认 42%） ---------- */
@@ -210,11 +279,13 @@ function packSummary(s) {
     avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost, medianHpLost: s.medianHpLost,
     avgTurns: s.avgTurns, playsPerRun: s.playsPerRun, winrateCI: s.winrateCI,
     attribution: (s.attribution || []).slice(0, 10).map(a => ({ cardId: a.cardId, damage: a.damage, share: a.share })),
+    hpHist: s.hpHist || null, bestRun: s.bestRun || null, worstRun: s.worstRun || null,
     plays: (s.plays || []).map(p => ({ cardId: p.cardId, total: p.total, avg: p.avg, perPlay: p.perPlay })),
   };
 }
 function qStore(q) {
-  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, est: it.est || null, estSummary: it.estSummary || null, estBestLabel: it.estBestLabel || '', blocks: it.blocks || null, cardPlays: it.cardPlays == null ? null : it.cardPlays, baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null }));
+  return (q || []).map(it => ({ enc: it.enc, done: !!it.done, winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, est: it.est || null, estSummary: it.estSummary || null, estBestLabel: it.estBestLabel || '', blocks: it.blocks || null, cardPlays: it.cardPlays == null ? null : it.cardPlays, baseWinrate: it.baseWinrate == null ? null : it.baseWinrate,
+    partial: !!it.partial, jobId: it.jobId || null, report: it.report || null }));
 }
 function qRestore(list) {
   if (!Array.isArray(list)) return [];
@@ -222,10 +293,164 @@ function qRestore(list) {
     enc: it.enc, done: !!it.done, running: false,
     winrate: it.winrate == null ? null : it.winrate, summary: it.summary || null, best: it.best || null, status: '',
     est: it.est || null, estSummary: it.estSummary || null, cardPlays: it.cardPlays == null ? null : it.cardPlays,
-    baseWinrate: it.baseWinrate == null ? null : it.baseWinrate, report: it.report || null,
+    baseWinrate: it.baseWinrate == null ? null : it.baseWinrate,
     estBestLabel: it.estBestLabel || '', blocks: it.blocks || null,
   }));
 }
+/* ---------- 结果文件夹（2026-11-28）：测试前选，跑完自动归类 ---------- */
+/* 卡组相对初始卡组的改动名：初始卡组 / 删2打 / 删1打1防 / 删2防 / 加1张。
+   进阶之灾是进阶难度自带的，不算改动。 */
+const DECK_DIFF_IGNORE = new Set(['ASCENDERS_BANE']);
+function deckVariantName() {
+  const start = starterDeck(state.character) || [];
+  const startCount = new Map();
+  for (const e of start) startCount.set(e.cardId, (startCount.get(e.cardId) || 0) + (e.count || 1));
+  const cur = new Map();
+  for (const d of state.deck) cur.set(d.cardId, (cur.get(d.cardId) || 0) + (d.count || 1));
+  const rem = { atk: 0, def: 0, skl: 0 };
+  for (const [id, n] of startCount) {
+    const m = n - (cur.get(id) || 0);
+    if (m <= 0) continue;
+    const card = state.cardsById.get(id) || {};
+    const isDefend = /^DEFEND/i.test(id) || /防御/.test(card.name || '');
+    if (isDefend) rem.def += m;
+    else if (Number(card.type) === 1) rem.atk += m;
+    else rem.skl += m;
+  }
+  let add = 0;
+  for (const [id, n] of cur) {
+    if (DECK_DIFF_IGNORE.has(id)) continue;
+    const s = startCount.get(id) || 0;
+    if (n > s) add += n - s;
+  }
+  const del = [];
+  if (rem.atk) del.push(rem.atk + '打');
+  if (rem.def) del.push(rem.def + '防');
+  if (rem.skl) del.push(rem.skl + '技');
+  const parts = [];
+  if (del.length) parts.push('删' + del.join(''));   // 删1打1防 / 删2打 / 删2防
+  if (add) parts.push('加' + add + '张');
+  return parts.length ? parts.join('') : '初始卡组';
+}
+function resultLabel() {
+  const root = String(state.resultFolder || '').trim().replace(/^\/+|\/+$/g, '');
+  if (!root) return '';
+  const parts = [root];
+  if (state.resultAuto !== false) parts.push(deckVariantName());
+  // 再按地图分一层（2026-11-28 他说 10 卡测试要按地图归类），遇到事件/未知地图就不加
+  const enc = state.encById && state.encById.get(state.encounter);
+  const map = enc && enc.map;
+  if (map && /^(密林|暗巷|巢穴|荣耀)$/.test(map)) parts.push(map);
+  return parts.join('/');
+}
+function renderFolderBar() {
+  const t = document.getElementById('folderText');
+  if (!t) return;
+  const root = String(state.resultFolder || '').trim();
+  t.textContent = root || '未选择（不归类）';
+  const pv = document.getElementById('folderPreview');
+  if (pv) pv.textContent = root
+    ? '这次会存到：' + resultLabel()
+    : '点这里选文件夹，跑完自动归类（不选就还跟以前一样不归类）';
+  const box = document.getElementById('folderAuto');
+  if (box) box.checked = state.resultAuto !== false;
+}
+
+let _folders = null, _folderSel = '';
+
+async function loadFolderTree() {
+  try { _folders = await (await fetch('/api/db/folders')).json(); }
+  catch { _folders = { rows: [] }; }
+  renderFolderTree();
+}
+function renderFolderTree() {
+  const box = document.getElementById('folderTree');
+  if (!box) return;
+  const rows = (_folders && _folders.rows) || [];
+  if (!rows.length) { box.innerHTML = '<div class="mini" style="padding:10px 12px">还没有文件夹。这一页只负责选；要新建，先去 8770 结果库里建好，再回来选。</div>'; return; }
+  // 接口已经按「子目录算进上级」汇总过了（和资源管理器一样），这里直接照着摆，别再累加
+  const nodes = new Map();
+  for (const r of rows) {
+    const segs = r.path.split('/').filter(Boolean);
+    let acc = '';
+    segs.forEach((seg, depth) => {
+      acc = acc ? acc + '/' + seg : seg;
+      if (!nodes.has(acc)) nodes.set(acc, { path: acc, name: seg, depth, jobs: 0, runs: 0 });
+    });
+    const self = nodes.get(acc);
+    self.jobs = r.jobs || 0; self.runs = r.runs || 0;
+  }
+  for (const n of nodes.values()) n.kids = [...nodes.keys()].filter(k => k.startsWith(n.path + '/')).length;
+  // 先父后子：同一层按 8770 里调好的 sort_order，再按名字；不再按整条路径比字典序
+  const orderOf = new Map(rows.map(r => [r.path, Number.isFinite(r.order) ? r.order : 999999]));
+  const byParent = new Map();
+  for (const n of nodes.values()) {
+    const cut = n.path.lastIndexOf('/');
+    const parent = cut >= 0 ? n.path.slice(0, cut) : '';
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(n);
+  }
+  for (const arr of byParent.values()) {
+    arr.sort((a, b) => ((orderOf.get(a.path) ?? 999999) - (orderOf.get(b.path) ?? 999999)) || a.name.localeCompare(b.name, 'zh'));
+  }
+  const list = [];
+  (function walk(parent) {
+    for (const n of byParent.get(parent) || []) { list.push(n); walk(n.path); }
+  })('');
+  box.innerHTML = list.map(n => `<div class="ftrow${n.path === _folderSel ? ' sel' : ''}" data-path="${esc(n.path)}" style="padding-left:${10 + n.depth * 18}px">
+      <span class="fi">${n.kids ? '📁' : '📄'}</span>
+      <span class="fn">${esc(n.name)}</span>
+      <span class="fc">${Number(n.jobs || 0)} 次 · ${Number(n.runs || 0)} 局</span>
+    </div>`).join('');
+  box.querySelectorAll('.ftrow').forEach(el => {
+    el.addEventListener('click', () => { _folderSel = el.dataset.path; renderFolderTree(); });
+  });
+}
+function openFolderModal() {
+  const m = document.getElementById('folderModal');
+  if (!m) return;
+  _folderSel = String(state.resultFolder || '');
+  m.classList.remove('hidden');
+  loadFolderTree();
+}
+function closeFolderModal() {
+  const m = document.getElementById('folderModal');
+  if (m) m.classList.add('hidden');
+}
+
+/* 事件只绑一次（初始化时调） */
+function wireFolderUI() {
+  const pick = document.getElementById('folderPick');
+  if (pick) pick.addEventListener('click', openFolderModal);
+  const close = document.getElementById('folderClose');
+  if (close) close.addEventListener('click', closeFolderModal);
+  const modal = document.getElementById('folderModal');
+  if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeFolderModal(); });
+  const choose = document.getElementById('folderChoose');
+  if (choose) choose.addEventListener('click', () => {
+    state.resultFolder = _folderSel || '';
+    saveLocal(); renderFolderBar(); closeFolderModal();
+  });
+  const clear = document.getElementById('folderClear');
+  if (clear) clear.addEventListener('click', () => {
+    state.resultFolder = '';
+    saveLocal(); renderFolderBar(); closeFolderModal();
+  });
+  // 这里不再提供「新建文件夹」：只负责选，建文件夹去 8770 结果库
+  const auto = document.getElementById('folderAuto');
+  if (auto) auto.addEventListener('change', () => {
+    state.resultAuto = !!auto.checked;
+    saveLocal(); renderFolderBar();
+  });
+  // 卡组一改，预览（会存到哪）跟着变
+  ['deckList', 'deckPool'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('click', () => setTimeout(renderFolderBar, 60), true);
+    el.addEventListener('input', () => setTimeout(renderFolderBar, 60), true);
+  });
+}
+
 function saveLocal() {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
@@ -237,14 +462,18 @@ function saveLocal() {
         hp: state.hp, maxHp: state.maxHp, ascension: state.ascension, actIndex: state.actIndex,
         gameMode: state.gameMode, dreadBoss: state.dreadBoss,
         count: state.count, prefix: state.prefix, potionPolicy: state.potionPolicy,
-        mode: state.mode, cmpCards: state.cmpCards, restOpts: state.restOpts, lastJob: state.lastJob,
+        concurrency: state.concurrency || 0,
+        mode: state.mode, cmpCards: state.cmpCards, cmpRecent: state.cmpRecent, restOpts: state.restOpts, lastJob: state.lastJob,
         midCollapsed: !!state.midCollapsed,
+    sidesCollapsed: !!state.sidesCollapsed,
         queue: qStore(state.queue),
         queueCmp: qStore(state.queueCmp),
         queueUp: qStore(state.queueUp),
         deckListH: state.deckListH || 0,
+        resultFolder: state.resultFolder || '', resultAuto: state.resultAuto !== false,
       }));
     } catch { }
+    renderFolderBar();
   }, 250);
 }
 function loadLocal() {
@@ -283,12 +512,18 @@ function loadLocal() {
   if (Number.isFinite(s.count)) state.count = s.count;
   if (s.prefix) state.prefix = s.prefix;
   if (s.potionPolicy) state.potionPolicy = s.potionPolicy;
+  if (Number.isFinite(s.concurrency)) state.concurrency = Math.max(0, Math.min(CONCURRENCY_MAX, Math.round(s.concurrency)));
+  applyConcurrency(state.concurrency);
   if (s.mode) state.mode = s.mode;
   state.cmpCards = arr(s.cmpCards).filter(c => c && c.cardId);
+  state.cmpRecent = arr(s.cmpRecent).filter(c => c && c.cardId).slice(0, 40);
   if (s.lastJob && s.lastJob.id) state.lastJob = { id: String(s.lastJob.id), mode: s.lastJob.mode || 'single' };
   if (s.restOpts) state.restOpts = { ...state.restOpts, ...s.restOpts };
   state.midCollapsed = !!s.midCollapsed;
+  state.sidesCollapsed = !!s.sidesCollapsed;
   state.deckListH = Number.isFinite(s.deckListH) ? s.deckListH : 0;
+  state.resultFolder = typeof s.resultFolder === 'string' ? s.resultFolder : '';
+  state.resultAuto = s.resultAuto !== false;
   const st = starterRelicOf(state.character);
   if (st) state.relics = state.relics.filter(r => r !== st);
   return true;
@@ -298,7 +533,28 @@ function syncInputs() {
   set('hp', state.hp); set('maxhp', state.maxHp); set('ascension', state.ascension);
   set('count', state.count); set('prefix', state.prefix); set('potionPolicy', state.potionPolicy);
   const gm = $('#gameMode'); if (gm) gm.value = state.gameMode;
+  renderConcurrencyPicker();
   renderDread();
+}
+
+/* 并行下拉：0 = 自动（物理核数），其余 1..上限 手选；上限来自服务端 /api/caps */
+function renderConcurrencyPicker() {
+  const cs = $('#concurrency');
+  if (!cs) return;
+  const phys = (SERVER_CAPS && Number(SERVER_CAPS.physicalCores)) || PHYSICAL_CORES;
+  const max = Math.max(4, Math.min(CONCURRENCY_MAX, 64));
+  cs.textContent = '';
+  const auto = document.createElement('option');
+  auto.value = '0';
+  auto.textContent = `自动（${phys}）`;
+  cs.appendChild(auto);
+  for (let n = 1; n <= max; n++) {
+    const o = document.createElement('option');
+    o.value = String(n);
+    o.textContent = n === phys ? `${n}（推荐）` : String(n);
+    cs.appendChild(o);
+  }
+  cs.value = String(state.concurrency || 0);
 }
 
 function modePayload() {
@@ -464,9 +720,12 @@ async function init() {
 
   renderCharacters();
   bindTop();
+  loadCaps();
   renderRelicChips();
   renderDeck();
   renderPool();
+  renderFolderBar();
+  wireFolderUI();
 
 
   renderResults();
@@ -578,6 +837,14 @@ function bindTop() {
     });
     if (id === 'potionPolicy') el.addEventListener('change', () => { state.potionPolicy = el.value; });
   }
+  const csSel = $('#concurrency');
+  if (csSel) csSel.addEventListener('change', () => {
+    state.concurrency = Number(csSel.value) || 0;
+    applyConcurrency(state.concurrency);
+    saveLocal();
+    const tip = $('#progressText');
+    if (tip && !state.running) tip.textContent = `并行 = ${CONCURRENCY}（下次开跑生效）`;
+  });
   $('#run').addEventListener('click', run);
   $('#csv').addEventListener('click', exportCsv);
   const gmSel = $('#gameMode');
@@ -1165,10 +1432,78 @@ const ENC_IDS = {
 /* 先选地图（四张图 + 全部 + 事件），再选怪的种类 */
 const ENC_MAPS = ['全部', '密林', '暗巷', '巢穴', '荣耀', '事件'];
 const ENC_KINDS = [['weak', '弱怪'], ['normal', '普通'], ['elite', '精英'], ['boss', 'Boss'], ['event', '事件']];
-/* 名单压缩：一次把整类怪都排进去，跑完出「单卡战损预估」数据图 */
+/* 名单压缩：一次把整类怪都排进去，跑完统一导出（每只怪一行） */
 const GROUP_KINDS = { weak: '全部弱怪', normal: '全部普通怪', elite: '全部精英', boss: '全部Boss' };
 const GROUP_PREFIX = '__GROUP_';
 const ENC_MOUNTED = {};   // mode -> root element
+
+/* 排队挪进中间栏（2026-11-27 22:05 他说的：排队挤占遭遇，逐条结果一出来队列就看不见了）。
+   中间栏开跑前是空的，正好放队列清单 + 逐条结果；右边遭遇栏保住整块高度。
+   做法是把原来挂在右栏的 #qList / #qResult 两个容器搬进中间，id 不变，渲染函数一行都不用改。 */
+const MID_SEL = { single: '#modeSingle .mid-panel', compare: '#modeCompare .mid-panel', upgrade: '#modeUpgrade .mid-panel' };
+
+function mountMidQueue(mode) {
+  const id = ENC_IDS[mode];
+  const mid = $(MID_SEL[mode]);
+  if (!id || !mid) return;
+  let sec = document.getElementById('midQ-' + mode);
+  if (!sec) {
+    sec = document.createElement('section');
+    sec.className = 'mid-queue hidden';
+    sec.id = 'midQ-' + mode;
+    sec.innerHTML = `<div class="panel-head"><h3>排队</h3><span class="mq-meta muted tiny"></span>
+      <span class="mq-bar" title="整条队列的进度"><i></i></span>
+      <button type="button" class="ghost small mq-fold" title="收起左右两边，全宽看结果（Alt+S）">⤢ 全宽</button></div>
+      <div class="mq-body"></div><div class="mq-res"></div>`;
+    const head = mid.querySelector('.panel-head');
+    mid.insertBefore(sec, head ? head.nextSibling : mid.firstChild);
+    sec.querySelector('.mq-fold').onclick = e => { e.stopPropagation(); setSidesCollapsed(!state.sidesCollapsed); };
+  }
+  const body = sec.querySelector('.mq-body'), res = sec.querySelector('.mq-res');
+  const list = document.getElementById(id.qList), qres = document.getElementById(id.qResult);
+  if (list && list.parentElement !== body) body.appendChild(list);
+  if (qres && qres.parentElement !== res) res.appendChild(qres);
+  syncMidQueue(mode);
+}
+
+/* 中间那块排队区的标题栏：整条队列的进度条 + 第几项 / 本项算到第几局；队列空了就整块藏起来 */
+function syncMidQueue(mode) {
+  const sec = document.getElementById('midQ-' + mode);
+  if (!sec) return;
+  const q = qArr(mode);
+  const doneN = q.filter(it => it.done).length;
+  const runIdx = q.findIndex(it => it.running);
+  const cur = runIdx >= 0 ? q[runIdx] : null;
+  const show = q.length > 0;
+  sec.classList.toggle('hidden', !show);
+  // 全跑完就把排队块缩回去，把高度还给结果区（跑的时候它要占大半，他说的「太矮了」）
+  sec.classList.toggle('q-done', show && !cur && doneN === q.length);
+  // 整条队列的完成度：算完的算 1，正在算的那项按「已跑样本 / 总数」折算
+  let frac = doneN;
+  if (cur && cur.totalN) frac += Math.min(1, (cur.doneN || 0) / cur.totalN);
+  const pct = q.length ? Math.round(frac / q.length * 1000) / 10 : 0;
+  const meta = sec.querySelector('.mq-meta');
+  if (meta) {
+    meta.textContent = show
+      ? `${doneN}/${q.length} 算完${cur ? ` · 第 ${runIdx + 1} 项${cur.totalN ? ` ${cur.doneN || 0}/${cur.totalN}` : ''}` : ''}`
+      : '';
+  }
+  const bar = sec.querySelector('.mq-bar');
+  if (bar) {
+    bar.classList.toggle('hidden', !cur);
+    const i = bar.querySelector('i');
+    if (i) i.style.width = pct + '%';
+    bar.title = `整条队列 ${pct}%（${doneN}/${q.length} 项，正在算第 ${runIdx + 1} 项）`;
+  }
+  // 顶上那根总进度条也跟着走，中间栏收起来时也能看到到哪了
+  if (cur) {
+    const barTop = $('#bar');
+    if (barTop) barTop.style.width = pct + '%';
+    const pt = $('#progressText');
+    if (pt) pt.textContent = `排队 ${doneN}/${q.length}${cur.totalN ? ` · 本项 ${cur.doneN || 0}/${cur.totalN}` : ''}`;
+    setMidProgress(cur.totalN ? `${doneN}/${q.length} · ${cur.doneN || 0}/${cur.totalN}` : `${doneN}/${q.length}`);
+  }
+}
 
 function mountEncPanel(rootSel, mode) {
   const root = typeof rootSel === 'string' ? $(rootSel) : rootSel;
@@ -1221,6 +1556,7 @@ function mountEncPanel(rootSel, mode) {
   renderEncLists();
   renderQueue(mode);
   renderQueueResults(mode);
+  mountMidQueue(mode);
 }
 
 function renderEncLists() {
@@ -1239,7 +1575,7 @@ function renderEncLists() {
       const n = state.meta.encounters.filter(e => e.kind === k && (map === '全部' || (e.map || '事件') === map)).length;
       if (!n) return '';
       const scope = map === '全部' ? '全部地图' : map;
-      return `<div class="enc-item group ${(state.encGroups || []).includes(k) ? 'active' : ''}" data-group="${k}" title="把${scope}的 ${n} 只${label.replace('全部', '')}一次排进队，每只按上面的样本数跑，跑完出一张战损数据图">
+      return `<div class="enc-item group ${(state.encGroups || []).includes(k) ? 'active' : ''}" data-group="${k}" title="把${scope}的 ${n} 只${label.replace('全部', '')}一次排进队，每只按上面的样本数跑，跑完点「导出 CSV」就能拿到每只怪一行的整组数据">
         <span>▣ ${esc(label)}</span><span class="gcount">${n} 只</span>
       </div>`;
     }).join('') : '';
@@ -1276,7 +1612,7 @@ function renderEncLists() {
 /* ---------- run + results ---------- */
 async function run() {
   if (!state.deck.length) { alert('卡组不能为空'); return; }
-  // 选了「全部弱怪 / 全部普通怪…」：一次把这几组怪全跑一遍，跑完出数据图
+  // 选了「全部弱怪 / 全部普通怪…」：一次把这几组怪全跑一遍，跑完统一导出
   if ((state.encGroups || []).length) {
     addToQueue('single');
     runQueue('single');
@@ -1284,6 +1620,7 @@ async function run() {
   }
   if (!state.encounter) { alert('先选一个遭遇'); return; }
   autoCollapseMid();
+  setSidesCollapsed(false);
   state.running = true;
   $('#run').disabled = true;
   $('#csv').disabled = true;
@@ -1313,6 +1650,7 @@ async function run() {
       beam: 135,
       nodes: 100000,
       budget: 5000,
+      label: resultLabel(),
     };
     const r = await fetch('/api/solve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json();
@@ -1328,6 +1666,90 @@ async function run() {
     $('#progressText').textContent = '提交失败：' + e.message;
     reportError('提交失败：' + e.message, e.stack || '');
   }
+}
+
+/* ---------- 断点续接（2026-11-27 22:2x 他要求的） ----------
+   服务端把任务配置和每个样本的结果都落了盘（runs/<id>/job.json + results.jsonl），
+   所以「你点终止」和「进程被关掉」都能接着补：这里把没跑完的列出来，点一下从这里继续。 */
+function renderResumeBar(list) {
+  const bar = $('#resumeBar');
+  if (!bar) return;
+  const items = (list || []).filter(j => j && j.done < j.total);
+  state.unfinished = items;
+  if (!items.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  bar.classList.remove('hidden');
+  const modeName = { single: '单场', compare: '对比', upgrade: '升级', rest: '睡觉' };
+  bar.innerHTML = `<span class="rtitle">没跑完 ${items.length} 个</span>` + items.map(j => {
+    const pct = j.total ? Math.round(j.done / j.total * 100) : 0;
+    return `<span class="rjob">
+      <b>${esc(j.encounterName || j.encounter || '（没记遭遇）')}</b>
+      <span class="rmeta">${modeName[j.mode] || j.mode || ''} ${j.done}/${j.total} · ${pct}% · ${j.status === 'interrupted' ? '上次断了' : '你终止的'}</span>
+      <button type="button" class="ghost small" data-resume-go="${esc(j.id)}">继续跑</button>
+    </span>`;
+  }).join('');
+}
+
+async function loadUnfinished() {
+  try {
+    const r = await fetch('/api/jobs/unfinished');
+    if (!r.ok) return;
+    const j = await r.json();
+    renderResumeBar(j.jobs || []);
+  } catch { }
+}
+
+async function resumeJob(id) {
+  const btn = document.querySelector(`[data-resume-go="${id}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '续接中…'; }
+  try {
+    const info = (state.unfinished || []).find(x => x.id === id) || {};
+    const r = await fetch('/api/job/' + id + '/resume', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '续接失败');
+    state.running = true;
+    state.jobId = id;
+    state.runningJob = { id }; syncStopBtn();
+    $('#run').disabled = true;
+    $('#progressText').textContent = `续接 ${j.done}/${j.total}`;
+    $('#progLabel').textContent = '接着跑';
+    setMidCollapsed(false);
+    if (info.mode === 'single') poll();
+    else resumeWatch(id, info.mode);   // 对比/升级续接不进单场面板，只跟进度，跑完进结果库
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '继续跑'; }
+    reportError('续接失败：' + e.message, e.stack || '');
+  }
+}
+
+async function resumeWatch(id, mode) {
+  const tick = async () => {
+    try {
+      const r = await fetch('/api/job/' + id);
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.status === 'running') {
+        $('#progressText').textContent = `续接 ${j.done}/${j.total}`;
+        $('#bar').style.width = (j.total ? j.done / j.total * 100 : 0) + '%';
+        setTimeout(tick, 1500);
+      } else {
+        state.running = false; state.runningJob = null; syncStopBtn();
+        $('#run').disabled = false;
+        $('#bar').style.width = '100%';
+        $('#progressText').textContent = `续接完成 ${j.done}/${j.total}（${mode || j.mode} 的数据已进结果库）`;
+        loadUnfinished();
+      }
+    } catch { setTimeout(tick, 2500); }
+  };
+  tick();
+}
+
+function bindResumeBar() {
+  const bar = $('#resumeBar');
+  if (!bar) return;
+  bar.addEventListener('click', e => {
+    const b = e.target.closest('[data-resume-go]');
+    if (b && !b.disabled) resumeJob(b.dataset.resumeGo);
+  });
 }
 
 async function poll() {
@@ -1361,7 +1783,9 @@ async function poll() {
       // 汇总在 variants[0].summary 里（publicJob 没有顶层 summary）——之前只认 job.summary，导致「导出 CSV」一直灰着
       if (job.summary || (job.variants && job.variants[0] && job.variants[0].summary)) $('#csv').disabled = false;
       if (job.status === 'failed') $('#progressText').textContent = '失败：' + (job.lastError || '');
-      autoExpandMid();
+      if (job.status === 'cancelled' && job.done < job.total) loadUnfinished();  // 终止也能续接：条上出现「继续跑」
+      setMidCollapsed(false);   // 跑完一定把结果栏打开
+      autoCollapseSides();
       return;
     }
     $('#progressText').textContent = `${job.done}/${job.total}`;
@@ -1481,7 +1905,135 @@ function cmpAnalysisMini(s, o) {
   </div>`;
 }
 
+
+/* ================= 中间只留一行数据入口（2026-11-28） =================
+   他要的：数据不在中间显示，算完在新网页里看；中间留「打开数据图 ↗」+「导出 CSV」。 */
+const CENTER_MIN = true;
+
+function dataBarBox(mode) {
+  if (mode === 'compare') return document.getElementById('cmpResult');
+  if (mode === 'upgrade') return document.getElementById('upResult');
+  if (mode === 'rest') return document.getElementById('restResult');
+  return document.getElementById('dataBar');
+}
+
+function renderRunBar(mode, job, opt) {
+  const box = dataBarBox(mode);
+  if (!box) return;
+  const o = opt || {};
+  const st = (job && job.status) || '';
+  const done = (job && job.done) || 0;
+  const total = (job && job.total) || 0;
+  const head = st === 'cancelled' ? `已终止 ${done}/${total}`
+    : st === 'failed' ? `失败 ${done}/${total}`
+      : st === 'done' ? `算完了 ${done}/${total}`
+        : st ? `算着 ${done}/${total}` : (o.text || '还没有数据');
+  const sec = (job && job.elapsedSec) ? ` · ${job.elapsedSec}s` : '';
+  const ok = st === 'done' || st === 'cancelled';
+  const rep = `<button class="ghost small" data-report="${mode}"${ok ? '' : ' disabled'}>打开数据图 ↗</button>`;
+  const csv = mode === 'single' ? '' : `<button class="ghost small" data-csv="${mode}"${ok ? '' : ' disabled'}>导出 CSV</button>`;
+  box.innerHTML = `<div class="data-bar-row"><b>${esc(head)}</b><span class="muted tiny">${esc(sec)}</span>${rep}${csv}
+    <span class="muted tiny">明细都在新开的网页里，中间不再显示</span></div>`;
+  box.classList.remove('hidden');
+}
+
+/* 刷新之后 state.job 是空的：用上次的任务 id 去服务端把那份 job 捞回来（runs/<id>/job.json 一直在） */
+async function hydrateLastJob() {
+  if (state.job && state.job.variants && state.job.variants.length) return state.job;
+  const id = (state.lastJob && state.lastJob.id) || '';
+  if (!id) return null;
+  try {
+    const r = await fetch('/api/job/' + encodeURIComponent(id));
+    if (!r.ok) return null;
+    const jb = await r.json();
+    if (jb && jb.variants) { state.job = jb; return jb; }
+  } catch { }
+  return null;
+}
+
+/* 报告数据：跟「导出 CSV」同一份（exportBlocks），换算成 /api/estimate 要的形状 */
+async function reportPayload(mode) {
+  let blocks = [];
+  if (mode !== 'rest') { try { blocks = exportBlocks(mode); } catch { blocks = []; } }
+  if (!blocks.length) {
+    if (await hydrateLastJob()) { try { blocks = exportBlocks(mode); } catch { blocks = []; } }
+  }
+  if (!blocks.length && state.job && state.job.variants) {
+    const job = state.job;
+    blocks = job.variants.map((v, i) => {
+      const cid = (v.card && v.card.cardId) || null;
+      return {
+        key: i === 0 ? 'base' : (cid ? 'card:' + cid : 'v' + i),
+        title: i === 0 ? '默认卡组' : (cid ? cardName(cid) : (v.label || '候选卡')),
+        note: i === 0 ? '' : '换上这张牌', cardId: cid,
+        rows: v.summary ? [{ enc: job.encounter, name: qName(job.encounter), s: v.summary, cardId: cid }] : [],
+      };
+    }).filter(b => b.rows.length);
+  }
+  if (!blocks.length) return null;
+  const cardNamesMap = {};
+  if (state.cardsById) state.cardsById.forEach((c, id) => { cardNamesMap[id] = c.name; });
+  const job = state.job || {};
+  const enc = job.encounter || state.encounter || '';
+  const encObj = state.encById && state.encById.get(enc);
+  const cands = mode === 'compare' ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
+    : mode === 'upgrade' ? state.upPicks.map(i => cardName(state.deck[i] && state.deck[i].cardId)).join(' / ') : '';
+  return {
+    title: '战损数据 · ' + ({ compare: '自选对比', upgrade: '多选一升级', rest: '升级 vs 睡觉' }[mode] || '单场测算'),
+    label: encObj ? encObj.name : (enc || ''),
+    mode, map: state.encMap || '', kind: '', candidate: cands, count: state.count,
+    blocks: blocks.map(b => ({
+      key: b.key, title: b.title, note: b.note, cardId: b.cardId,
+      rows: b.rows.map(r => ({
+        enc: r.enc, name: r.name, winrate: r.s.winrate,
+        avgHpLost: r.s.avgHpLost, minHpLost: r.s.minHpLost, maxHpLost: r.s.maxHpLost,
+        medianHpLost: r.s.medianHpLost, avgTurns: r.s.avgTurns, runs: r.s.runs, wins: r.s.wins,
+        playsPerRun: r.s.playsPerRun == null ? null : r.s.playsPerRun,
+        cardPlays: r.cardId ? ((playsOf(r.s, r.cardId) || {}).avg ?? null) : null,
+        attribution: r.s.attribution || [],
+        hpHist: r.s.hpHist || null,
+        best: r.s.bestRun || null,
+        worst: r.s.worstRun || null,
+      })),
+    })),
+    cardNames: cardNamesMap,
+  };
+}
+
+/* 单独开一个网页看数据：先把窗口开出来（免得被拦），拿到地址再指过去 */
+async function openDataReport(mode) {
+  const w = window.open('', '_blank');
+  try {
+    const payload = await reportPayload(mode);
+    if (!payload) { if (w) w.close(); reportError('还没有可看的数据：先跑一次', ''); return; }
+    const r = await fetch('/api/estimate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || '生成失败');
+    if (w) w.location.href = j.url; else window.open(j.url, '_blank');
+  } catch (e) {
+    if (w) w.close();
+    reportError('数据图生成失败：' + e.message, e.stack || '');
+  }
+}
+
+document.addEventListener('click', ev2 => {
+  const t = ev2.target;
+  if (!t || !t.closest) return;
+  const rep = t.closest('[data-report]');
+  if (rep) { ev2.preventDefault(); openDataReport(rep.getAttribute('data-report')); return; }
+  const csv = t.closest('[data-csv]');
+  if (csv) { ev2.preventDefault(); exportCsv(); }
+});
+
 function renderResults(job) {
+  if (CENTER_MIN) {
+    if (!job) { const b0 = document.getElementById('dataBar'); if (b0) b0.classList.add('hidden'); return; }
+    state.job = job;
+    renderRunBar('single', job);
+    return;
+  }
   if (!job) {
     $('#winrate').textContent = '—';
     $('#resultStats').innerHTML = '';
@@ -1537,7 +2089,8 @@ function renderResults(job) {
     (avgDef > 0) ? `<span title="失败局平均还差多少血没打死">没打死时差 <b>${avgDef}</b> 血</span>` : '',
     job.elapsedSec ? `<span>耗时 <b>${job.elapsedSec}s</b></span>` : '',
   ].join('');
-  if (job.lastError) $('#resultStats').insertAdjacentHTML('beforeend', `<span style="color:#c0392b">错误：${esc(job.lastError)}</span>`);
+  // 被终止的任务报「模拟器退出」是我们自己 kill 的，不算错，别用红字吓人
+  if (job.lastError && job.status !== 'cancelled') $('#resultStats').insertAdjacentHTML('beforeend', `<span style="color:#c0392b">错误：${esc(job.lastError)}</span>`);
   $('#singleAttr').innerHTML = (v.summary && v.summary.attribution && v.summary.attribution.length)
     ? attrBlock(v.summary.attribution, '伤害归因（全部样本合计）') : '';
   $('#singlePlays').innerHTML = playsBlock(v.summary);
@@ -1554,25 +2107,99 @@ function renderResults(job) {
   $('#resultList').innerHTML = rows || '<div class="empty">等待第一局结果…</div>';
 }
 
-function exportCsv() {
-  const job = state.job;
-  const v = job && job.variants && job.variants[0];
-  if (!v || !v.results || !v.results.length) return;
-  const head = ['seed', 'won', 'hpLost', 'deficit', 'turns', 'status', 'sec'];
-  const lines = [head.join(',')];
-  for (const r of v.results) lines.push([r.seed, r.won, r.hpLost, r.deficit, r.turns, r.status, r.sec].map(v2 => v2 == null ? '' : v2).join(','));
-  const { lo, hi, avg } = hpRangeOf(v.summary || {});
-  if (lo != null && hi != null) lines.push(['# 预估掉血区间', lo, hi, '平均', avg == null ? '' : avg.toFixed(2)].join(','));
-  // 打出次数也一并导出，方便自己在 Excel 里排序看
-  const plays = (v.summary && v.summary.plays) || [];
-  if (plays.length) {
-    lines.push('# 打出次数（全部样本合计）', ['cardId', '卡名', '次数', '每局平均'].join(','));
-    for (const p of plays) lines.push([p.cardId, cardName(p.cardId), p.total, p.avg.toFixed(2)].join(','));
+/* 导出（2026-11-27 23:1x 他说的：中间那张数据图取消，不管单场 / 对比 / 升级 / 排队，
+   统一导出「整组」那份数据）——一行 = 一只怪（对比/升级里的一路），列和原来那张整组表一样。 */
+function exportBlocks(mode) {
+  const q = qArr(mode).filter(it => it.done && (it.summary || it.estSummary));
+  const blocks = [];
+  const blk = (key, title, note, cardId) => {
+    let b = blocks.find(x => x.key === key);
+    if (!b) { b = { key, title: title || '默认卡组', note: note || '', cardId: cardId || null, rows: [] }; blocks.push(b); }
+    return b;
+  };
+  if (q.length) {
+    // 排队跑出来的：每只怪一行，按块（默认卡组 / 每张候选卡）分开
+    for (const it of q) {
+      const bs = (it.blocks && it.blocks.length)
+        ? it.blocks
+        : [{ key: 'base', title: '默认卡组', note: '', cardId: null, summary: it.estSummary || it.summary }];
+      for (const b of bs) {
+        if (!b || !b.summary) continue;
+        blk(b.key, b.title, b.note, b.cardId).rows.push({ enc: it.enc, name: qName(it.enc), s: b.summary, cardId: b.cardId || null });
+      }
+    }
+  } else if (state.job && state.job.variants && state.job.variants.length) {
+    // 一次跑完的（单场 / 对比 / 升级）：每个变体一路
+    const enc = state.job.encounter || state.encounter;
+    state.job.variants.forEach((v, i) => {
+      if (!v || !v.summary) return;
+      const cid = (v.card && v.card.cardId) || null;
+      const key = i === 0 ? 'base' : (cid ? 'card:' + cid : 'v' + i);
+      const title = i === 0 ? '默认卡组' : (cid ? cardName(cid) : (v.label || '候选卡'));
+      const note = i === 0 ? (state.job.mode === 'single' ? '' : '不放这张牌') : '换上这张牌';
+      blk(key, title, note, cid).rows.push({ enc, name: qName(enc), s: v.summary, cardId: cid });
+    });
   }
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  return blocks.filter(b => b.rows.length);
+}
+
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function buildExportCsv() {
+  const blocks = exportBlocks(state.mode || 'single');
+  if (!blocks.length) return null;
+  const head = ['分组', '遭遇', '样本数', '胜', '胜率', '预估战损', '战损最低', '战损最高', '中位数战损', '均回合', '每局打出', '每次伤害', '均用药', '每回合浪费能量',
+    '最好一局掉血', '最好一局种子', '最差一局掉血', '最差一局种子', '战损分布'];
+  // 战损分布写成「0血×2 / 2血×2 / 4血×1」这样，Excel 里也看得懂
+  const distTxt = h => (Array.isArray(h) && h.length)
+    ? h.map(x => (x.from === x.to ? x.from : x.from + '-' + x.to) + '血×' + x.runs).join(' / ') : '';
+  const lines = [head.join(',')];
+  for (const b of blocks) {
+    for (const r of b.rows) {
+      const s = r.s || {};
+      const cp = r.cardId ? playsOf(s, r.cardId) : null;
+      const plays = r.cardId ? (cp ? cp.avg : 0) : (s.playsPerRun == null ? null : s.playsPerRun);
+      const perPlay = r.cardId ? (cp ? cp.perPlay : null)
+        : ((s.attrTotal != null && s.playsTotal) ? s.attrTotal / s.playsTotal : null);
+      lines.push([
+        b.title, r.name, s.runs, s.wins,
+        s.winrate == null ? '' : (s.winrate * 100).toFixed(1) + '%',
+        s.avgHpLost == null ? '' : Math.round(s.avgHpLost * 10) / 10,
+        s.minHpLost, s.maxHpLost,
+        s.medianHpLost == null ? '' : Math.round(s.medianHpLost * 10) / 10,
+        s.avgTurns == null ? '' : Math.round(s.avgTurns * 10) / 10,
+        plays == null ? '' : Math.round(plays * 10) / 10,
+        perPlay == null ? '' : Math.round(perPlay * 10) / 10,
+        s.avgPotionsUsed == null ? '' : s.avgPotionsUsed,
+        s.energyWastePerTurn == null ? '' : s.energyWastePerTurn,
+        s.bestRun ? s.bestRun.hpLost : '',
+        s.bestRun ? s.bestRun.seed : '',
+        s.worstRun ? s.worstRun.hpLost : '',
+        s.worstRun ? s.worstRun.seed : '',
+        distTxt(s.hpHist),
+      ].map(csvCell).join(','));
+    }
+  }
+  const first = blocks[0];
+  const name = 'sts2-' + (blocks.length > 1 ? blocks.length + '组' : String(first.title).replace(/[\\/:*?"<>|]/g, '_'))
+    + '-' + blocks.reduce((n, b) => n + b.rows.length, 0) + '项.csv';
+  return { text: lines.join('\r\n'), name, rows: lines.length - 1, blocks: blocks.length };
+}
+
+async function exportCsv() {
+  let out = buildExportCsv();
+  if (!out) {
+    if (await hydrateLastJob()) out = buildExportCsv();
+  }
+  if (!out) { qHint(state.mode || 'single', '还没有可导出的数据：先跑一次'); return; }
+  // 加 BOM：Excel 直接双击打开中文不乱码
+  const blob = new Blob(['\ufeff' + out.text], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'sts2-' + (job.encounter || 'run') + '-' + job.total + 'seeds.csv';
+  a.download = out.name;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -1695,7 +2322,7 @@ function bindModes() {
     $('#modeCompare').classList.toggle('hidden', state.mode !== 'compare');
     $('#modeRest').classList.toggle('hidden', state.mode !== 'rest');
     $('#modeUpgrade').classList.toggle('hidden', state.mode !== 'upgrade');
-    if (state.mode === 'compare') { renderCmpSlots(); renderCmpPool(); renderCmpState(); }
+    if (state.mode === 'compare') { renderCmpSlots(); renderCmpPool(); renderCmpState(); renderCmpRecent(); }
     if (state.mode === 'rest') { renderRestPanel(); renderRestState(); }
     if (state.mode === 'upgrade') renderUpgradeAll();
   };
@@ -1782,6 +2409,7 @@ function attachJob(id, mode) {
 
 /* ================= 三卡对比 ================= */
 function renderCmpState() {
+  if (!document.getElementById('cmpState')) return;   // 「当前状态」已经删了
   const n = state.deck.reduce((s, d) => s + d.count, 0);
   $('#cmpState').innerHTML = [
     `<div>卡组 <b>${n}</b> 张 · 遗物 <b>${state.relics.length}</b> 件</div>`,
@@ -1789,6 +2417,153 @@ function renderCmpState() {
     `<div>遭遇 <b>${esc(state.encById.get(state.encounter)?.name || state.encounter)}</b></div>`,
   ].join('');
 }
+
+// 「最近选过」——对比模式里记住最近加入过槽位的卡，按角色分组，点一下直接加回去。
+// 2026-11-28 他提的：换怪测试时想不起上次那 10 张，又不想一张张对照着加。
+
+const CMP_RECENT_MAX = 40;      // 总共记多少张
+const CMP_RECENT_PER_CH = 8;    // 每个角色最多显示几张
+
+function cmpRecentList() {
+  if (!Array.isArray(state.cmpRecent)) state.cmpRecent = [];
+  return state.cmpRecent;
+}
+
+// 记一笔：同一张卡只留最近一次，超出上限丢最老的
+function cmpRemember(cardId) {
+  if (!cardId) return;
+  const list = cmpRecentList().filter((x) => x && x.cardId !== cardId);
+  list.unshift({ cardId, ch: state.character || '', at: Date.now() });
+  state.cmpRecent = list.slice(0, CMP_RECENT_MAX);
+  saveLocal();
+}
+
+// 加一张进槽位（卡池点击、最近选过点击都走这里）
+function cmpAddCard(cardId) {
+  if (!cardId) return false;
+  if (state.cmpCards.length >= CMP_MAX) { alert(`最多 ${CMP_MAX} 张`); return false; }
+  if (state.cmpCards.some((x) => x.cardId === cardId)) { toastTip(`「${(state.cardsById.get(cardId) || {}).name || cardId}」已经在槽里了`); return false; }
+  state.cmpCards.push({ cardId, upgradeLevels: 0 });
+  cmpRemember(cardId);
+  renderCmpSlots();
+  renderCmpRecent();
+  return true;
+}
+
+function toastTip(msg) {
+  let el = document.getElementById('tipToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'tipToast';
+    el.className = 'tip-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTip._t);
+  toastTip._t = setTimeout(() => el.classList.remove('show'), 1600);
+}
+
+function cmpRecentGroups() {
+  const only = ($('#cmpRecentCh') || {}).value || '';
+  const groups = new Map();
+  for (const it of cmpRecentList()) {
+    if (!it || !it.cardId) continue;
+    const ch = it.ch || '';
+    if (only && ch !== only) continue;
+    if (!groups.has(ch)) groups.set(ch, []);
+    const arr = groups.get(ch);
+    if (arr.length < CMP_RECENT_PER_CH) arr.push(it);
+  }
+  return groups;
+}
+
+function renderCmpRecent() {
+  const box = document.getElementById('cmpRecent');
+  if (!box) return;
+  const sel = document.getElementById('cmpRecentCh');
+  // 角色下拉：当前角色 + 历史上出现过的角色
+  if (sel) {
+    const chs = [...new Set(cmpRecentList().map((x) => x.ch).filter(Boolean))];
+    const cur = state.character || '';
+    if (cur && !chs.includes(cur)) chs.unshift(cur);
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">全部角色</option>' + chs.map((c) =>
+      `<option value="${esc(c)}">${esc(charNameOf(c))}</option>`).join('');
+    sel.value = chs.includes(keep) ? keep : '';
+  }
+  const groups = cmpRecentGroups();
+  if (!groups.size) {
+    box.innerHTML = '<div class="empty tiny">还没有记录：点下面的牌加进槽位，就会记在这里，下次一键加回。</div>';
+    return;
+  }
+  const order = [...groups.keys()].sort((a, b) => (a === (state.character || '') ? -1 : b === (state.character || '') ? 1 : 0));
+  box.innerHTML = order.map((ch) => {
+    const cards = groups.get(ch).map((it) => {
+      const c = state.cardsById.get(it.cardId) || { id: it.cardId, name: it.cardId };
+      return `<div class="recent-chip" data-recent="${esc(it.cardId)}" title="${esc(c.name)}（点一下加进槽位）">
+        ${imgTag(c)}
+        <div class="cap">${esc(c.name)}</div>
+      </div>`;
+    }).join('');
+    return `<div class="recent-group"><div class="recent-ch">${esc(ch ? charNameOf(ch) : '没记角色')}</div><div class="recent-chips">${cards}</div></div>`;
+  }).join('');
+}
+
+// 绑定：角色下拉切换重画；点心选回槽位；清空记录
+(function bindCmpRecent() {
+  const sel = document.getElementById('cmpRecentCh');
+  if (sel) sel.addEventListener('change', () => renderCmpRecent());
+  const box = document.getElementById('cmpRecent');
+  if (box) box.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-recent]');
+    if (chip) cmpAddCard(chip.dataset.recent);
+  });
+  const clr = document.getElementById('cmpRecentClear');
+  if (clr) clr.addEventListener('click', () => {
+    if (!cmpRecentList().length) return;
+    if (!confirm('清空「最近选过」的记录？（不影响已经在槽里的卡）')) return;
+    state.cmpRecent = [];
+    saveLocal();
+    renderCmpRecent();
+  });
+})();
+
+// 从结果库里把「上一次对比测试用的那套卡」捞回来（他想不起上次那 10 张时用这个）
+async function cmpRestoreFromJob(jobId) {
+  try {
+    const d = await (await fetch('/api/db/job/' + encodeURIComponent(jobId))).json();
+    if (!d || !d.variants) { toastTip('这次记录读不出来'); return; }
+    const cards = d.variants.filter((v) => v.key !== 'base' && v.card_id).map((v) => v.card_id);
+    if (!cards.length) { toastTip('这次记录里没有候选卡'); return; }
+    if (state.cmpCards.length && !confirm('用这次记录里的 ' + cards.length + ' 张卡替换现在槽里的？')) return;
+    state.cmpCards = cards.slice(0, CMP_MAX).map((cardId) => ({ cardId, upgradeLevels: 0 }));
+    for (const c of cards.slice(0, CMP_MAX)) cmpRemember(c);
+    renderCmpSlots(); renderCmpRecent(); renderCmpPool();
+    const name = (d.job && (d.job.encounter_name || d.job.encounter_id)) || '';
+    toastTip('已从「' + name + '」恢复 ' + Math.min(cards.length, CMP_MAX) + ' 张');
+  } catch (e) {
+    toastTip('读取失败：' + e.message);
+  }
+}
+
+async function cmpRestoreLast() {
+  try {
+    const r = await fetch('/api/db/jobs?mode=compare&limit=12');
+    const list = await r.json();
+    const rows = (list && list.rows) || [];
+    const job = rows.find((j) => (j.variants || 0) >= 2) || rows[0];
+    if (!job) { toastTip('库里还没有对比记录'); return; }
+    await cmpRestoreFromJob(job.id);
+  } catch (e) {
+    toastTip('读取失败：' + e.message);
+  }
+}
+// 恢复按钮
+(function bindRestore() {
+  const btn = document.getElementById('cmpRestoreLast');
+  if (btn) btn.addEventListener('click', cmpRestoreLast);
+})();
 
 function renderCmpSlots() {
   const box = $('#cmpSlots');
@@ -1836,7 +2611,7 @@ function renderCmpPool() {
     if (!it) return;
     if (state.cmpCards.length >= CMP_MAX) { alert(`最多 ${CMP_MAX} 张`); return; }
     if (state.cmpCards.some(x => x.cardId === it.dataset.id)) return;
-    state.cmpCards.push({ cardId: it.dataset.id, upgradeLevels: 0 });
+    cmpAddCard(it.dataset.id);
     renderCmpSlots();
   };
 }
@@ -1845,6 +2620,7 @@ async function runCompare() {
   if (!state.deck.length) { alert('卡组是空的：先在「单场测算」里导入或组牌'); return; }
   if (state.cmpCards.length < 1) { alert('至少选一张候选卡'); return; }
   autoCollapseMid();
+  setSidesCollapsed(false);
   const btn = $('#cmpRun');
   btn.disabled = true;
   $('#cmpResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -1875,6 +2651,7 @@ async function runCompare() {
 }
 
 function renderCompare(job, opts) {
+  if (CENTER_MIN) { state.job = job; renderRunBar(opts && opts.container === '#upResult' ? 'upgrade' : 'compare', job); return; }
   const o = opts || {};
   const box = $(o.container || '#cmpResult');
   const base = job.variants[0];
@@ -2017,6 +2794,7 @@ function renderUpgradeAll() {
 async function runUpgrade() {
   if (state.upPicks.length < 1) { upHint('至少选一张要升级的牌'); return; }
   autoCollapseMid();
+  setSidesCollapsed(false);
   const btn = $('#upRun');
   btn.disabled = true;
   $('#upResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -2101,6 +2879,7 @@ async function runRest() {
   const targetIndex = Number($('#restCard').value);
   if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= state.deck.length) { alert('先选一张要升级的卡'); return; }
   autoCollapseMid();
+  setSidesCollapsed(false);
   const btn = $('#restRun');
   btn.disabled = true;
   $('#restResult').innerHTML = '<div class="empty">跑着…</div>';
@@ -2115,6 +2894,7 @@ async function runRest() {
       nodes: 100000, budget: Number($('#restBudget').value) || 8000,
       targetIndex,
       rest: { healPercent: r0.pct, base: $('#restBase').value, pillow: r0.pillow, furnace: r0.furnace },
+      label: resultLabel(),
     };
     const r = await fetch('/api/rest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json();
@@ -2132,6 +2912,7 @@ async function runRest() {
 }
 
 function renderRest(job) {
+  if (CENTER_MIN) { state.job = job; renderRunBar('rest', job); return; }
   const up = job.variants[0], rest = job.variants[1];
   const us = up.summary || {}, rs = rest.summary || {};
   const rows = [up, rest].map(v => {
@@ -2175,7 +2956,7 @@ function qName(id) {
   const e = state.encById.get(id);
   return e ? e.name : id;
 }
-/* 「全部弱怪」这类是名单压缩：一组怪一起排队，跑完出一张数据图 */
+/* 「全部弱怪」这类是名单压缩：一组怪一起排队，跑完统一导出 */
 function groupIds(kind) {
   const map = state.encMap || '全部';
   return state.meta.encounters
@@ -2194,14 +2975,18 @@ function renderQueue(mode) {
   if (!box) return;
   const q = qArr(mode);
   if (!q.length) {
-    box.innerHTML = '<div class="muted tiny">上面 ▣ 全部弱怪 / 全部普通怪 / 全部精英 / 全部Boss 可以多选（选具体地图就只算那张图），点了再按「开始测算 / 开始排队」，跑完生成一张战损数据图。单只怪也能正常排队。</div>';
+    box.innerHTML = '<div class="muted tiny">上面 ▣ 全部弱怪 / 全部普通怪 / 全部精英 / 全部Boss 可以多选（选具体地图就只算那张图），点了再按「开始测算 / 开始排队」，跑完点「导出 CSV」拿到每只怪一行的整组数据。单只怪也能正常排队。</div>';
   } else {
-    box.innerHTML = q.map((it, i) => `<div class="q-item${it.running ? ' run' : ''}${it.done ? ' done' : ''}" data-i="${i}">
+    box.innerHTML = q.map((it, i) => {
+      const p = it.running && it.totalN ? Math.min(100, Math.round((it.doneN || 0) / it.totalN * 100)) : null;
+      return `<div class="q-item${it.running ? ' run' : ''}${it.done ? ' done' : ''}" data-i="${i}">
       <span class="q-idx">${i + 1}</span>
       <span class="q-name" title="${esc(it.status || '')}">${it.est ? `<span class="muted tiny">▣ ${esc(it.est.group)}</span> ` : ''}${encLink(it.enc, qName(it.enc))}</span>
-      <span class="q-st">${it.running ? '算着…' : it.done ? (it.winrate == null ? '完了' : `${((it.est && it.estSummary ? it.estSummary.winrate : it.winrate) * 100).toFixed(1)}%`) : '等着'}</span>
+      <span class="q-st">${it.running ? (it.totalN ? `${it.doneN || 0}/${it.totalN}` : '算着…') : it.done ? (it.winrate == null ? '完了' : `${((it.est && it.estSummary ? it.estSummary.winrate : it.winrate) * 100).toFixed(1)}%`) : it.partial ? it.status || '被终止' : '等着'}</span>
       <button class="ghost small" data-qdel="${i}" title="从队列里去掉（正在算的那只先点「■ 终止」）">×</button>
-    </div>`).join('');
+      ${p == null ? '' : `<span class="q-bar" title="${p}%"><b style="width:${p}%"></b></span>`}
+    </div>`;
+    }).join('');
   }
   const btn = $('#' + id.qRun);
   if (btn) btn.disabled = !q.some(it => !it.done);
@@ -2218,6 +3003,7 @@ function renderQueue(mode) {
     qArr(mode).splice(i, 1);
     saveLocal(); renderQueue(mode);
   };
+  syncMidQueue(mode);
 }
 function renderQueueAll() { for (const m of Object.keys(ENC_IDS)) renderQueue(m); }
 function qHint(mode, text) {
@@ -2235,7 +3021,7 @@ function qHint(mode, text) {
 function addToQueue(mode) {
   const groups = (state.encGroups || []).slice();
   if (groups.length) {
-    // 「全部弱怪」这类不是一只怪：把组里每只怪各排一行（跟手动排 5 只一样），跑完再合一张数据图
+    // 「全部弱怪」这类不是一只怪：把组里每只怪各排一行（跟手动排 5 只一样），导出时每只一行
     const map = state.encMap || '全部';
     for (const k of groups) {
       const ids = groupIds(k);
@@ -2264,6 +3050,7 @@ function solvePayload(enc) {
     ...modePayload(), hp: state.hp, maxHp: state.maxHp, count: state.count, prefix: state.prefix || 'Q',
     potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
     nodes: 100000, budget: 5000,
+    label: resultLabel(),
   };
 }
 function cmpPayload(enc) {
@@ -2274,6 +3061,7 @@ function cmpPayload(enc) {
     potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
     nodes: 100000, budget: Number($('#cmpBudget') && $('#cmpBudget').value) || 8000,
     candidates: state.cmpCards.map(c => ({ cardId: c.cardId, upgradeLevels: c.upgradeLevels || 0 })),
+    label: resultLabel(),
   };
 }
 function upgPayload(enc) {
@@ -2284,6 +3072,7 @@ function upgPayload(enc) {
     potionPolicy: state.potionPolicy, concurrency: CONCURRENCY, profile: 'VeryHigh', beam: 135,
     nodes: 100000, budget: Number($('#upBudget') && $('#upBudget').value) || 8000,
     picks: state.upPicks.map(i => ({ index: i })),
+    label: resultLabel(),
   };
 }
 const QUEUE_RUN = {
@@ -2291,68 +3080,8 @@ const QUEUE_RUN = {
   compare: { url: '/api/compare', body: cmpPayload, base: job => job.variants[0] },
   upgrade: { url: '/api/upgrade3', body: upgPayload, base: job => job.variants[0] },
 };
-/* 一组怪都跑完：把每只的胜率/战损/回合 + 选中那张牌的次数合成一张数据图（服务端出 HTML） */
-async function maybeBuildEstimate(mode) {
-  const q = qArr(mode);
-  const labels = [...new Set(q.filter(it => it.est && it.done).map(it => it.est.group))];
-  for (const g of labels) {
-    const items = q.filter(it => it.est && it.est.group === g);
-    const allDone = items.length && items.every(it => it.done && it.estSummary);
-    if (!allDone || items.some(it => it.report)) continue;
-    /* 分块：默认卡组一块，每张候选卡各一块；块内每只怪一行（带它自己的伤害归因） */
-    const keyList = [];
-    for (const it of items) for (const b of (it.blocks || [])) {
-      if (!b || !b.key || keyList.some(k => k.key === b.key)) continue;
-      keyList.push({ key: b.key, title: b.title || b.key, note: b.note || '', cardId: b.cardId || null });
-    }
-    if (!keyList.length) keyList.push({ key: 'base', title: '默认卡组', note: '', cardId: null });
-    const blocks = keyList.map(k => ({
-      key: k.key, title: k.title, note: k.note, cardId: k.cardId,
-      rows: items.map(it => {
-        const blk = (it.blocks || []).find(b => b && b.key === k.key);
-        const s = (blk && blk.summary) || it.estSummary || {};
-        const cp = k.cardId ? playsOf(s, k.cardId) : null;
-        return {
-          enc: it.enc, name: qName(it.enc), winrate: s.winrate,
-          avgHpLost: s.avgHpLost, minHpLost: s.minHpLost, maxHpLost: s.maxHpLost,
-          medianHpLost: s.medianHpLost, avgTurns: s.avgTurns, runs: s.runs, wins: s.wins,
-          playsPerRun: s.playsPerRun == null ? null : s.playsPerRun,
-          cardPlays: k.cardId ? (cp ? cp.avg : 0) : null,
-          attribution: s.attribution || [],
-        };
-      }),
-    }));
-    const cardNamesMap = {};
-    if (state.cardsById) state.cardsById.forEach((c, id) => { cardNamesMap[id] = c.name; });
-    const it0 = items[0];
-    const cands = mode === 'compare'
-      ? state.cmpCards.map(c => cardName(c.cardId)).join(' / ')
-      : mode === 'upgrade'
-        ? state.upPicks.map(i => cardName(state.deck[i] && state.deck[i].cardId)).join(' / ')
-        : '';
-    const report = await saveEstimateReport({
-      title: `单卡战损预估 · ${g}`, label: g, mode,
-      map: (it0.est && it0.est.map) || state.encMap,
-      kind: GROUP_KINDS[(it0.est && it0.est.kind)] || '',
-      candidate: cands, count: state.count, blocks, cardNames: cardNamesMap,
-    });
-    items[items.length - 1].report = report;
-    saveLocal();
-  }
-}
-async function saveEstimateReport(payload) {
-  try {
-    const r = await fetch('/api/estimate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const j = await r.json();
-    return r.ok && j.ok ? j : null;
-  } catch (e) {
-    reportError('数据图生成失败：' + e.message, e.stack || '');
-    return null;
-  }
-}
+/* 2026-11-27 23:1x 他要求：中间那张「数据图」取消，统一改成导出「整组」那份数据（见 exportCsv）。 */
+
 async function runQueue(mode) {
   const q = qArr(mode);
   const first = q.findIndex(it => !it.done);
@@ -2362,7 +3091,8 @@ async function runQueue(mode) {
   if (mode === 'upgrade' && !state.upPicks.length) { qHint(mode, '先选至少一张要升级的牌'); return; }
   if (!state.encounter && !(state.encGroups || []).length) { qHint(mode, '先选一个遭遇，或点上面的「全部弱怪 / 全部普通怪…」'); return; }
   if ((state.encGroups || []).length && !qArr(mode).some(it => !it.done)) addToQueue(mode);
-  autoCollapseMid();
+  setMidCollapsed(false);
+  setSidesCollapsed(false);
   const cfg = QUEUE_RUN[mode];
   const id = ENC_IDS[mode];
   const btn = $('#' + id.qRun);
@@ -2374,16 +3104,52 @@ async function runQueue(mode) {
     it.running = true; renderQueue(mode);
     try {
       /* ---- 单只怪（整组怪也是这么一只一只排进来的） ---- */
-      const body = cfg.body(it.enc);
-      const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      // 上次在这里被终止过：用服务端存的样本接着跑，不从头再来
+      const resumeId = (it.partial && it.jobId) ? it.jobId : null;
+      const r = resumeId
+        ? await fetch('/api/job/' + resumeId + '/resume', { method: 'POST' })
+        : await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg.body(it.enc)) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || '提交失败');
-      const job = await pollJob(j.id, jb => {
-        if (jb) { it.status = `${jb.done}/${jb.total} · ${jb.elapsedSec || 0}s`; renderQueue(mode); }
+      it.partial = false;
+      const job = await pollJob(resumeId || j.id, jb => {
+        if (jb) {
+          it.status = `${jb.done}/${jb.total} · ${jb.elapsedSec || 0}s`;
+          // 排队进度条要的是数字，不只是那句话（2026-11-27 22:2x 他要的）
+          it.doneN = jb.done || 0;
+          it.totalN = jb.total || 0;
+          it.elapsed = jb.elapsedSec || 0;
+          renderQueue(mode);
+        }
         if (jb && jb.status === 'cancelled') stopped = true;
       });
       it.running = false;
-      if (stopped || !job || job.status === 'cancelled') { it.status = '被终止'; it.done = true; renderQueue(mode); break; }
+      it.doneN = null; it.totalN = null;
+      if (stopped || !job || job.status === 'cancelled') {
+        /* 终止也要出数据（2026-11-28）：服务端 cancelJob 已经把算出来的那几局汇总进 summary，
+           这里必须接住并画到「测算结果」和排队结果表上，不然看着就是白跑。
+           这一项留 partial（不是 done），下次「开始排队」会用 /api/job/:id/resume 接着跑。 */
+        const bv = (job && cfg.base && cfg.base(job)) || {};
+        const s = bv.summary || {};
+        it.partial = true;
+        it.jobId = job ? job.id : it.jobId || null;
+        if (s && (s.runs || (bv.results || []).length)) {
+          it.winrate = s.winrate;
+          it.summary = s;
+          it.estSummary = s;
+          if (it.est) it.blocks = [{ key: 'base', title: '默认卡组', note: mode === 'single' ? '' : '不放这张牌', summary: packSummary(s) }];
+          it.status = `被终止 ${s.runs || (bv.results || []).length}/${(job && job.total) || '?'}`;
+          const csvBtn = document.getElementById('csv'); if (csvBtn) csvBtn.disabled = false;
+          state.job = job;            // 让「测算结果」也有数（单场看的就是它）
+          renderResults(job);
+        } else {
+          it.status = '被终止（还没算完一局）';
+        }
+        it.done = false;              // 留着，续接时接着跑这一项
+        renderQueue(mode);
+        renderQueueResults(mode);
+        break;
+      }
       const baseV = cfg.base(job) || {};
       const s = baseV.summary || {};
       it.done = true; it.winrate = s.winrate; it.summary = s; it.status = '';
@@ -2405,7 +3171,7 @@ async function runQueue(mode) {
       }
       // 组里的一只怪：对比/升级模式下要报「用了这张牌」那一路的数，不是不放这张牌的基线
       if (it.est) {
-        /* 每一路（默认卡组 + 每张候选卡）各存一份压缩摘要：数据图按块分开看，别混成一个数 */
+        /* 每一路（默认卡组 + 每张候选卡）各存一份压缩摘要：导出时按块分开，别混成一个数 */
         const vs = (job.variants || []);
         const baseV = vs[0] || { summary: s };
         const baseSum = baseV.summary || s || {};
@@ -2432,8 +3198,8 @@ async function runQueue(mode) {
           it.cardPlays = null;
           it.estBestLabel = '';
         }
-        await maybeBuildEstimate(mode);
       }
+      $('#csv').disabled = false;   // 有数据就能导出（统一导「整组」那份，见 exportCsv）
       renderQueue(mode); renderQueueResults(mode);
     } catch (e) {
       it.running = false; it.status = '失败：' + e.message; it.error = e.message;
@@ -2443,22 +3209,47 @@ async function runQueue(mode) {
     }
   }
   if (btn) btn.disabled = false;
-  autoExpandMid();
+  // 排队跑完：顶上那根条走到 100%，字改成「排队 N/N 完成」；被终止就写「已终止 x/N」
+  {
+    const barTop = $('#bar');
+    const pt = $('#progressText');
+    const doneN = q.filter(x => x.done).length;
+    if (stopped) {
+      if (barTop) barTop.style.width = (q.length ? doneN / q.length * 100 : 0) + '%';
+      if (pt) pt.textContent = `已终止 ${doneN}/${q.length}`;
+      const pl = document.getElementById('progLabel'); if (pl) pl.textContent = '已终止';
+    } else {
+      if (barTop) barTop.style.width = '100%';
+      if (pt) pt.textContent = `排队 ${doneN}/${q.length} 完成`;
+    }
+  }
+  setMidCollapsed(false);
+  autoCollapseSides();
 }
 function renderQueueResults(mode) {
   const id = ENC_IDS[mode];
   const box = $('#' + id.qResult);
   if (!box) return;
-  const done = qArr(mode).filter(it => it.done && it.summary);
-  if (!done.length) { box.innerHTML = ''; return; }
+  /* 2026-11-28：这张逐条结果表也算「数据在中间」，换成一行入口（明细去新网页看） */
+  if (CENTER_MIN) {
+    const doneItems = qArr(mode).filter(it => (it.done || it.partial) && it.summary);
+    if (!doneItems.length) { box.innerHTML = ''; syncMidQueue(mode); return; }
+    const part = doneItems.filter(it => it.partial).length;
+    box.innerHTML = `<div class="data-bar-row"><b>算了 ${doneItems.length} 只</b>${part ? `<span class="muted tiny">其中 ${part} 只被终止</span>` : ''}
+      <button class="ghost small" data-report="${mode}">打开数据图 ↗</button>
+      <button class="ghost small" data-csv="${mode}">导出 CSV</button></div>`;
+    syncMidQueue(mode);
+    return;
+  }
+  const done = qArr(mode).filter(it => (it.done || it.partial) && it.summary);
+  if (!done.length) { box.innerHTML = ''; syncMidQueue(mode); return; }
   const head = mode === 'single'
     ? '<tr><th>遭遇</th><th>胜率</th><th>战损</th><th>回合</th><th>每局打出</th><th>每次伤害</th></tr>'
     : '<tr><th>遭遇</th><th>胜率（用这张后）</th><th>最好的</th><th>战损</th><th>回合</th><th>这张牌每局</th></tr>';
   const rows = done.map(it => {
     /* 组里的一只怪：对比/升级模式报的是「用了这张牌」那一路，不是基线 */
     const s = (it.est && it.estSummary) ? it.estSummary : it.summary;
-    const rep = it.report ? ` <a class="q-report-link" href="${it.report.url}" target="_blank" rel="noreferrer noopener" title="打开这组怪的战损数据图">数据图 ↗</a>` : '';
-    const common = `<td>${encLink(it.enc, qName(it.enc))}${rep}</td>
+    const common = `<td>${encLink(it.enc, qName(it.enc))}</td>
       <td class="num"><b>${((s.winrate || 0) * 100).toFixed(1)}%</b>${s.winrateCI ? `<span class="muted tiny"> ±${(s.winrateCI.half * 100).toFixed(1)}</span>` : ''}${mode !== 'single' && it.estBestLabel ? `<span class="muted tiny"> ${esc(it.estBestLabel)}</span>` : ''}</td>`;
     if (mode === 'single') {
       return `<tr>${common}
@@ -2476,12 +3267,8 @@ function renderQueueResults(mode) {
       <td class="num">${b && b.plays != null ? `${fmtPlay(b.plays)} 次<span class="muted tiny">（基线 ${fmtPlay(b.basePlays)}）</span>` : '—'}</td>
     </tr>`;
   }).join('');
-  // 生成过的数据图都列出来，方便直接点开/另存
-  const reports = done.filter(it => it.report);
-  const repBox = reports.length
-    ? `<div class="q-reports">数据图：${reports.map(it => `<a href="${it.report.url}" target="_blank" rel="noreferrer noopener">${esc(it.report.name)}</a>`).join(' · ')}</div>`
-    : '';
-  box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>${repBox}`;
+  box.innerHTML = `<table class="q-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+  syncMidQueue(mode);
 }
 
 /* ================= 通用轮询 ================= */
@@ -2527,6 +3314,8 @@ async function stopRunning() {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || '停不下来');
     state.lastStop = { id: rj.id, killed: j.killed, done: j.done, total: j.total, at: Date.now() };
+    // 终止的这份任务服务端已经存了部分数据：立刻把「继续跑」条刷出来（排队里终止的那一项也走这里）
+    setTimeout(loadUnfinished, 300);
   } catch (e) {
     reportError('终止失败：' + e.message, e.stack || '');
     if (b) { b.disabled = false; b.textContent = '■ 终止'; }
@@ -2546,7 +3335,7 @@ if (_p.has('autotest')) {
 if (_p.has('refresh')) {
   setTimeout(refreshFromGame, 400);
 }
-init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); bindQueue(); });
+init().then(() => { bindModes(); bindErrorBar(); bindShot(); bindMidCollapse(); bindDeckSplit(); bindQueue(); bindResumeBar(); loadUnfinished(); });
 
 /* 终止按钮 + 三个模式各自的「遭遇/排队」面板挂载 */
 function bindQueue() {

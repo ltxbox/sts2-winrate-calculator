@@ -1,11 +1,13 @@
 // StS2 求解器可视化 UI 的本地服务：静态文件 + /api/meta + /api/solve + /api/compare + /api/rest + /api/job/:id
 // 只接 OfflineSearchHarness，不做任何前端模拟。
 import http from 'node:http';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { analyzeImage } from './lib/shot.mjs';
+import { createStore, buildEncounterIndex } from './lib/db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -36,6 +38,23 @@ const HARNESS = resolveHarness();
 const HARNESS_CMD = HARNESS.cmd;
 const HARNESS_PRE = HARNESS.pre;
 const PORT = Number(process.env.PORT || 8766);
+
+/* 并行上限：不再写死 12，按这台机器算（别人的机器更好就该能开更多）。
+   - 逻辑核数 = os.cpus().length（Windows 上是逻辑线程数）
+   - 推荐值 = 物理核数 ≈ 逻辑核数 / 2（8 核 16 线程 -> 8）
+   - 硬上限 = 逻辑核数，最多 64；可用环境变量 STS2_MAX_CONCURRENCY 覆盖
+   - 再按内存兜底：每个常驻 worker 按 400MB 估算，别把别人机器跑爆 */
+const LOGICAL_CORES = Math.max(2, os.cpus().length || 8);
+const PHYSICAL_CORES = Math.max(1, Math.floor(LOGICAL_CORES / 2));
+const MAX_CONCURRENCY = Math.max(2, Math.min(
+  64,
+  Number(process.env.STS2_MAX_CONCURRENCY) || LOGICAL_CORES,
+));
+function concurrencyBudget() {
+  // 每个常驻 worker 实测约 300–500MB（Godot 静态 + 求解器状态），按 500MB 算并只用 70% 空闲内存
+  const byRam = Math.floor((os.freemem() * 0.7) / (500 * 1024 * 1024));
+  return Math.max(2, Math.min(MAX_CONCURRENCY, byRam));
+}
 
 /* ---------- 把模拟器的崩溃翻译成人话 ---------- */
 function explainHarnessFailure(tail, code) {
@@ -113,6 +132,38 @@ const MIME = {
 const jobs = new Map();
 let seq = 0;
 fs.mkdirSync(RUNS, { recursive: true });
+
+/* ---------- 结果数据库（SQLite）：每跑完一次自动入库，历史可一键回填 ---------- */
+const DB_PATH = process.env.STS2_DB || path.join(ROOT, 'data', 'sts2.db');
+let store = null;
+let storeError = null;
+try {
+  store = createStore(DB_PATH);
+} catch (e) {
+  // 库坏了不能让整个服务起不来：页面照旧能算，只是「数据」页会提示原因
+  storeError = String((e && e.message) || e);
+  crashLog('db-open', e);
+}
+let encIndexCache = null;
+function encounterIndex() {
+  if (encIndexCache) return encIndexCache;
+  encIndexCache = buildEncounterIndex(readJson(path.join(ROOT, 'assets', 'meta.json')) || { encounters: [] });
+  return encIndexCache;
+}
+/** 跑完（或被终止但有结果）就把这次测算写进库。出错只记日志，不影响结果回给前端。 */
+function recordToDb(job, source = 'auto') {
+  if (!store || !job) return;
+  try {
+    if (store.getSetting('autoRecord') === '0') return;
+    store.recordJob(publicJob(job), {
+      source, createdAt: new Date().toISOString(),
+      label: job.label || null,
+      encounter: encounterIndex()[job.encounter] || (job.encounter ? { name: job.encounter, map: null, kind: null } : null),
+    });
+  } catch (e) {
+    crashLog('db-record', e);
+  }
+}
 
 function send(res, code, body, type) {
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
@@ -195,6 +246,16 @@ function parsePlayActions(actions) {
     byTurn.get(turn).push({ cardId: m[2], face: dmg, cost });
   }
   return byTurn;
+}
+
+/**
+ * 一局的出牌顺序：[[第 1 回合打的牌…], [第 2 回合…]]，按 planActions 里的先后。
+ * 「最好/最差那一局」要看的就是这个。
+ */
+function playOrder(hr) {
+  const byTurn = parsePlayActions((hr && hr.search && hr.search.planActions) || []);
+  const turns = [...byTurn.keys()].sort((a, b) => a - b);
+  return turns.map(t => byTurn.get(t).map(p => p.cardId));
 }
 
 /**
@@ -355,12 +416,72 @@ function pick(obj, name) {
   return undefined;
 }
 
+function prepareRunRequest(job, variant, seed) {
+  const dir = path.join(job.dir, variant.key, String(seed).replace(/[^\w.-]/g, '_'));
+  fs.mkdirSync(dir, { recursive: true });
+  const reqPath = path.join(dir, 'request.json');
+  fs.writeFileSync(reqPath, JSON.stringify(buildRequest(job, variant.deck, seed), null, 1), 'utf8');
+  return { dir, reqPath };
+}
+
+// 跑完（或失败）之后统一从产物目录读出这一局的行：单跑和常驻两条路共用
+function buildRunRow(job, variant, seed, dir, sec, errTail, code) {
+  let row = { seed, won: null, hpLost: null, deficit: null, status: 'no-result', sec };
+  const hr = readJson(path.join(dir, 'harness-result.json'));
+  const r = hr || readJson(path.join(dir, 'result.json'));
+  if (r) {
+    const q = r.comparisonQuality;
+    const wonVal = pick(q, 'won');
+    const hpVal = pick(q, 'projectedBattleHpLost');
+    const lostHp = Number.isFinite(hpVal) ? hpVal : (wonVal === false ? variant.hp : null);
+    const turnVal = pick(q, 'combatEndedTurn');
+    const enemyVal = pick(q, 'enemyHp');
+    const deficitVal = pick(q, 'strategicHpDeficit');
+    row = {
+      seed, won: wonVal === undefined ? null : !!wonVal,
+      hpLost: lostHp,
+      deficit: Number.isFinite(deficitVal) ? deficitVal : null,
+      turns: Number.isFinite(turnVal) ? turnVal : null,
+      enemyHp: Number.isFinite(enemyVal) ? enemyVal : null,
+      status: r.status || r.reachedMilestone || '?', sec,
+    };
+    if (!q && r.error) job.lastError = String(r.error);
+  } else {
+    // 没有结果文件 = 模拟器没跑成，把原因翻译出来，别让界面只显示 “失败”
+    const hint = explainHarnessFailure(errTail, code);
+    job.lastError = hint;
+    row.note = hint;
+  }
+  // 伤害归因只在 harness-result.json 里（有 planActions）
+  const attr = hr ? attributeResult(hr) : null;
+  if (attr) { row.attr = attr.byCard; row.perTurn = attr.perTurn; }
+  // 打出次数（每张牌打了几次），同样从 planActions 数出来
+  const plays = hr ? playCounts(hr) : null;
+  if (plays) {
+    row.plays = plays.byCard;
+    row.playsTotal = plays.total;
+    // 求解器的 quality 里没有「战斗在第几回合结束」，就用出牌记录里最大的回合号顶上
+    if (!Number.isFinite(row.turns) && plays.turns) row.turns = plays.turns;
+  }
+  // 能量浪费（估算）：回合开始能量 - 这回合出牌费用
+  const ew = hr ? energyWaste(hr) : null;
+  if (ew) { row.energyWaste = Math.round(ew.waste * 10) / 10; row.energyWastePerTurn = Math.round(ew.perTurn * 100) / 100; }
+  // 出牌顺序也留下来（最好/最差那两局要给人看牌序）
+  if (hr) { try { row.order = playOrder(hr); } catch { } }
+  // 药水用量只有 quality 里给（打了 / 用了几个）
+  const qualityObj = (hr && hr.comparisonQuality) || (r && r.comparisonQuality);
+  const potVal = pick(qualityObj, 'ProjectedBattlePotionCount');
+  if (Number.isFinite(potVal)) row.potionsUsed = potVal;
+  if (job.cancelled) row.status = 'cancelled';
+  // 明细删掉，省磁盘（KEEP_RUNS=1 时保留，便于排查）
+  if (!process.env.KEEP_RUNS) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { } }
+  return row;
+}
+
+/* 单跑：每局 spawn 一个 harness 进程（老路径，出问题时的退路；STS2_HARNESS_SERVE=0 强制走这里）。 */
 function runOne(job, variant, seed) {
   return new Promise(resolve => {
-    const dir = path.join(job.dir, variant.key, String(seed).replace(/[^\w.-]/g, '_'));
-    fs.mkdirSync(dir, { recursive: true });
-    const reqPath = path.join(dir, 'request.json');
-    fs.writeFileSync(reqPath, JSON.stringify(buildRequest(job, variant.deck, seed), null, 1), 'utf8');
+    const { dir, reqPath } = prepareRunRequest(job, variant, seed);
     const args = [...HARNESS_PRE, '--request', reqPath, '--label', seed, '--out', dir,
       '--profile', job.profile, '--beam', String(job.beam), '--nodes', String(job.nodes),
       '--potion-policy', job.potionPolicy];
@@ -389,56 +510,110 @@ function runOne(job, variant, seed) {
     child.on('exit', (code) => {
       if (job.children) job.children.delete(child);
       const sec = Math.round((Date.now() - started) / 100) / 10;
-      let row = { seed, won: null, hpLost: null, deficit: null, status: 'no-result', sec };
-      const hr = readJson(path.join(dir, 'harness-result.json'));
-      const r = hr || readJson(path.join(dir, 'result.json'));
-      if (r) {
-        const q = r.comparisonQuality;
-        const wonVal = pick(q, 'won');
-        const hpVal = pick(q, 'projectedBattleHpLost');
-        const lostHp = Number.isFinite(hpVal) ? hpVal : (wonVal === false ? variant.hp : null);
-        const turnVal = pick(q, 'combatEndedTurn');
-        const enemyVal = pick(q, 'enemyHp');
-        const deficitVal = pick(q, 'strategicHpDeficit');
-        row = {
-          seed, won: wonVal === undefined ? null : !!wonVal,
-          hpLost: lostHp,
-          deficit: Number.isFinite(deficitVal) ? deficitVal : null,
-          turns: Number.isFinite(turnVal) ? turnVal : null,
-          enemyHp: Number.isFinite(enemyVal) ? enemyVal : null,
-          status: r.status || r.reachedMilestone || '?', sec,
-        };
-        if (!q && r.error) job.lastError = String(r.error);
-      } else {
-        // 没有结果文件 = 模拟器没跑成，把原因翻译出来，别让界面只显示 “失败”
-        const hint = explainHarnessFailure(errTail, code);
-        job.lastError = hint;
-        row.note = hint;
-      }
-      // 伤害归因只在 harness-result.json 里（有 planActions）
-      const attr = hr ? attributeResult(hr) : null;
-      if (attr) { row.attr = attr.byCard; row.perTurn = attr.perTurn; }
-      // 打出次数（每张牌打了几次），同样从 planActions 数出来
-      const plays = hr ? playCounts(hr) : null;
-      if (plays) {
-        row.plays = plays.byCard;
-        row.playsTotal = plays.total;
-        // 求解器的 quality 里没有「战斗在第几回合结束」，就用出牌记录里最大的回合号顶上
-        if (!Number.isFinite(row.turns) && plays.turns) row.turns = plays.turns;
-      }
-      // 能量浪费（估算）：回合开始能量 - 这回合出牌费用
-      const ew = hr ? energyWaste(hr) : null;
-      if (ew) { row.energyWaste = Math.round(ew.waste * 10) / 10; row.energyWastePerTurn = Math.round(ew.perTurn * 100) / 100; }
-      // 药水用量只有 quality 里给（打了 / 用了几个）
-      const qualityObj = (hr && hr.comparisonQuality) || (r && r.comparisonQuality);
-      const potVal = pick(qualityObj, 'ProjectedBattlePotionCount');
-      if (Number.isFinite(potVal)) row.potionsUsed = potVal;
-      if (job.cancelled) row.status = 'cancelled';
-      // 明细删掉，省磁盘（KEEP_RUNS=1 时保留，便于排查）
-      if (!process.env.KEEP_RUNS) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { } }
-      resolve(row);
+      resolve(buildRunRow(job, variant, seed, dir, sec, errTail, code));
     });
   });
+}
+
+/* ---------- 常驻 worker（2026-11-28） ----------
+   harness 加了 --serve：进程起一次，按行收请求 JSON（request / out / label / hp / maxHp），
+   每局回一行 @@DONE。省掉每局约 2 秒的 exe 启动 + 游戏静态初始化。
+   本机实测：同一根请求冷启动单跑 3.9 秒 → 常驻第二局起 0.7~1.5 秒，胜/战损/回合/展开节点逐项一致。
+   一个 JS 并发槽挂一个常驻进程；进程挂了这一局补一次单跑，下一局重新起进程。
+   出问题可以 STS2_HARNESS_SERVE=0 整体退回按局 spawn 的老路径。 */
+const SERVE_ENABLED = process.env.STS2_HARNESS_SERVE !== '0';
+const SERVE_RECYCLE_RUNS = Math.max(20, Number(process.env.STS2_SERVE_RECYCLE) || 150);
+const SERVE_RUN_TIMEOUT_MS = Math.max(60000, Number(process.env.STS2_SERVE_TIMEOUT_MS) || 15 * 60 * 1000);
+
+function serveArgs(job) {
+  return [...HARNESS_PRE, '--serve',
+    '--profile', job.profile, '--beam', String(job.beam), '--nodes', String(job.nodes),
+    '--potion-policy', job.potionPolicy, '--workspace', job.dir];
+}
+
+function startServeWorker(job) {
+  const child = spawn(HARNESS_CMD, serveArgs(job), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const w = { child, buf: '', tail: '', ready: false, dead: false, seq: 0, pending: null };
+  if (job.children) job.children.add(child);
+  child.stdout.on('data', d => {
+    w.buf += d.toString('utf8');
+    let nl;
+    while ((nl = w.buf.indexOf('\n')) >= 0) {
+      const line = w.buf.slice(0, nl).replace(/\r$/, '');
+      w.buf = w.buf.slice(nl + 1);
+      if (line.startsWith('@@READY')) { w.ready = true; continue; }
+      if (!line.startsWith('@@DONE ')) continue;   // 每局的步骤表之类的普通输出直接忽略
+      let msg = null;
+      try { msg = JSON.parse(line.slice(7)); } catch { continue; }
+      const p = w.pending;
+      if (!p || msg.id !== p.id) continue;
+      w.pending = null;
+      clearTimeout(p.timer);
+      p.resolve(msg);
+    }
+  });
+  child.stderr.on('data', d => { w.tail = (w.tail + d.toString()).slice(-8000); });
+  const killPending = (why) => {
+    w.dead = true;
+    if (job.children) job.children.delete(child);
+    const p = w.pending;
+    if (p) { w.pending = null; clearTimeout(p.timer); p.reject(new Error(why)); }
+  };
+  child.on('exit', code => killPending('worker 退出（' + code + '）'));
+  child.on('error', e => killPending('worker 起不来：' + ((e && e.message) || e)));
+  w.send = (payload) => new Promise((resolve, reject) => {
+    if (w.dead) return reject(new Error('worker 已退出'));
+    const id = 'w' + (++w.seq);
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { }
+      const p = w.pending;
+      if (p && p.id === id) { w.pending = null; p.reject(new Error('这一局超过 ' + Math.round(SERVE_RUN_TIMEOUT_MS / 60000) + ' 分钟没回')); }
+    }, SERVE_RUN_TIMEOUT_MS);
+    w.pending = { id, resolve, reject, timer };
+    try { child.stdin.write(JSON.stringify({ ...payload, id }) + '\n'); }
+    catch (e) { w.pending = null; clearTimeout(timer); reject(e); }
+  });
+  return w;
+}
+
+function closeServeWorker(slot) {
+  const w = slot && slot.worker;
+  if (!w) return;
+  slot.worker = null;
+  slot.runs = 0;
+  try { w.child.stdin.write('{"cmd":"quit"}\n'); } catch { }
+  setTimeout(() => { try { w.child.kill(); } catch { } }, 800);
+}
+
+async function runOneServe(job, slot, variant, seed) {
+  const { dir, reqPath } = prepareRunRequest(job, variant, seed);
+  if (!slot.worker || slot.worker.dead) slot.worker = startServeWorker(job);
+  const started = Date.now();
+  try {
+    const msg = await slot.worker.send({
+      request: reqPath, out: dir, label: String(seed),
+      hp: variant.hp > 0 ? variant.hp : 0, maxHp: variant.maxHp > 0 ? variant.maxHp : 0,
+    });
+    const sec = Math.round((Date.now() - started) / 100) / 10;
+    const tail = slot.worker ? slot.worker.tail : '';
+    if (!msg.ok) job.lastError = explainHarnessFailure(tail, 1) + ' 内部：' + (msg.error || '');
+    slot.fallbackOnce = false;
+    slot.runs = (slot.runs || 0) + 1;
+    if (slot.runs >= SERVE_RECYCLE_RUNS) closeServeWorker(slot);   // 长任务定期换新进程，别让内存慢慢涨
+    return buildRunRow(job, variant, seed, dir, sec, tail, msg.ok ? 0 : 1);
+  } catch (e) {
+    const sec = Math.round((Date.now() - started) / 100) / 10;
+    try { closeServeWorker(slot); } catch { }
+    if (job.cancelled) return { seed, won: null, hpLost: null, deficit: null, status: 'cancelled', sec };
+    // 常驻这条路坏了：这一局改用单跑补上（同一个槽只补一次，免得每局都多花一次启动）
+    if (!slot.fallbackOnce) {
+      slot.fallbackOnce = true;
+      job.lastError = explainHarnessFailure('', 1) + ' 常驻 worker 出问题，改用单跑：' + ((e && e.message) || e);
+      return runOne(job, variant, seed);
+    }
+    job.lastError = explainHarnessFailure('', 1) + ' 常驻 worker 出问题：' + ((e && e.message) || e);
+    return { seed, won: null, hpLost: null, deficit: null, status: 'spawn-error', sec, note: job.lastError };
+  }
 }
 
 function summarizeVariant(v) {
@@ -521,6 +696,30 @@ function summarizeVariant(v) {
     : null;
   const avgTurns = rows.filter(r => r.turns).length
     ? rows.filter(r => r.turns).reduce((s, r) => s + r.turns, 0) / rows.filter(r => r.turns).length : null;
+  // ---- 战损分布：按整数掉血分桶，柱子太多就两两并 ----
+  const hpCount = Object.create(null);
+  for (const r of valid) {
+    const v0 = Math.max(0, Math.round(r.hpLost));
+    hpCount[v0] = (hpCount[v0] || 0) + 1;
+  }
+  let hpHist = Object.keys(hpCount).map(Number).sort((a, b) => a - b)
+    .map(v0 => ({ from: v0, to: v0, runs: hpCount[v0] }));
+  if (hpHist.length > 14) {
+    const step = Math.ceil(hpHist.length / 14);
+    const merged = [];
+    for (let i = 0; i < hpHist.length; i += step) {
+      const slice = hpHist.slice(i, i + step);
+      merged.push({ from: slice[0].from, to: slice[slice.length - 1].to, runs: slice.reduce((s, x) => s + x.runs, 0) });
+    }
+    hpHist = merged;
+  }
+  // ---- 最好的一局 / 最差的一局：带上那一局的出牌顺序 ----
+  const pickRun = row => (row ? {
+    seed: row.seed, hpLost: row.hpLost, turns: row.turns, won: row.won, deficit: row.deficit,
+    enemyHp: row.enemyHp, sec: row.sec, order: Array.isArray(row.order) ? row.order : null,
+  } : null);
+  const bestRow = valid.slice().sort((a, b) => (a.hpLost - b.hpLost) || ((b.won === true) - (a.won === true)))[0] || null;
+  const worstRow = valid.slice().sort((a, b) => (b.hpLost - a.hpLost) || ((a.won === true) - (b.won === true)))[0] || null;
   v.summary = {
     runs: rows.length, wins, losses: rows.length - wins,
     winrate: rows.length ? wins / rows.length : 0,
@@ -546,49 +745,127 @@ function summarizeVariant(v) {
     turnsHist,
     winrateCI,
     attrTotal: Math.round(attrTotal * 10) / 10,
+    // —— 2026-11-28 他要求：战损分布 + 最好/最差那一局的牌序 ——
+    hpHist,
+    bestRun: pickRun(bestRow),
+    worstRun: pickRun(worstRow),
   };
   return v.summary;
 }
 
+/* ---------- 断点续接的落盘（2026-11-27 22:2x 他要求：进程中止别白跑几个小时） ----------
+   两个文件：runs/<id>/job.json 存任务配置；runs/<id>/results.jsonl 每跑完一个样本追加一行（紧凑行，
+   不含 planActions，1000 个样本也就几百 KB~几 MB）。服务被杀/重启后靠这两样重建任务接着跑。 */
+function jobConfig(job) {
+  return {
+    id: job.id, mode: job.mode, seeds: job.seeds, meta: job.meta || null,
+    relics: job.relics || [], relicProps: job.relicProps || {}, potions: job.potions || [],
+    encounter: job.encounter, character: job.character, ascension: job.ascension,
+    gameMode: job.gameMode || 'Standard', dreadBoss: job.dreadBoss || '',
+    profile: job.profile, beam: job.beam, nodes: job.nodes, concurrency: job.concurrency,
+    potionPolicy: job.potionPolicy, budget: job.budget, actIndex: job.actIndex || 0,
+    createdAt: job.startedAt || Date.now(),
+    label: job.label || null,
+    variants: (job.variants || []).map(v => ({ key: v.key, label: v.label, deck: v.deck, card: v.card || null, hp: v.hp, maxHp: v.maxHp })),
+  };
+}
+function saveJobConfig(job) {
+  try { fs.writeFileSync(path.join(job.dir, 'job.json'), JSON.stringify(jobConfig(job), null, 1), 'utf8'); } catch { }
+}
+function appendResultRow(job, vKey, seed, row) {
+  try { fs.appendFileSync(path.join(job.dir, 'results.jsonl'), JSON.stringify({ v: vKey, seed, row }) + '\n', 'utf8'); } catch { }
+}
+function readResultRows(jobDir) {
+  let txt = '';
+  try { txt = fs.readFileSync(path.join(jobDir, 'results.jsonl'), 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of txt.split('\n')) {
+    if (!line.trim()) continue;
+    try { const o = JSON.parse(line); if (o && o.row && o.v) out.push(o); } catch { }
+  }
+  return out;
+}
+function writeSummary(job) {
+  try { fs.writeFileSync(path.join(job.dir, 'summary.json'), JSON.stringify({ job: publicJob(job) }, null, 1), 'utf8'); } catch { }
+}
+
 async function runVariants(job) {
+  /* 2026-11-27 22:2x 他要求「断点续接」：中断过的任务再跑，只补没跑过的种子，不从头来。
+     已经算完的样本在 v.results 里（进程重启后由 results.jsonl 读回来）。 */
   const tasks = [];
-  for (const v of job.variants) for (const s of job.seeds) tasks.push({ v, s });
-  job.total = tasks.length;
+  for (const v of job.variants) {
+    const have = new Set((v.results || []).map(r => String(r.seed)));
+    for (const s of job.seeds) if (!have.has(String(s))) tasks.push({ v, s });
+  }
+  job.total = job.variants.length * job.seeds.length;
+  job.done = job.variants.reduce((n, v) => n + (v.results ? v.results.length : 0), 0);
+  if (!tasks.length) {
+    // 什么都没剩下：直接按已完成收尾（续接时补完最后几个样本会走到这里）
+    job.finishedAt = Date.now();
+    job.status = 'done';
+    finishSummaries(job);
+    writeSummary(job);
+    recordToDb(job);
+    return;
+  }
   const workers = Math.max(1, Math.min(job.concurrency, tasks.length));
   let idx = 0;
-  job.startedAt = Date.now();
+  /* 「代」标记：终止或续接都给 job.gen 加一，上一轮还在 await 的 worker 循环发现代变了就退场，
+     不会因为 job.cancelled 被续接清成 false 又接着领任务（那样会把样本算两遍）。 */
+  const gen = job.gen || 0;
+  const stale = () => (job.gen || 0) !== gen || job.cancelled;
+  job.startedAt = job.startedAt || Date.now();
+  // 常驻模式：每个并发槽挂一个常驻 harness 进程（见 runOneServe）；出问题用 STS2_HARNESS_SERVE=0 退回按局 spawn
+  const slots = (SERVE_ENABLED && HARNESS_CMD) ? Array.from({ length: workers }, () => ({ worker: null, runs: 0 })) : null;
+  let slotSeq = 0;
   async function worker() {
-    while (true) {
-      if (job.cancelled) return;
-      const i = idx++;
-      if (i >= tasks.length) return;
-      const t = tasks[i];
-      const row = await runOne(job, t.v, t.s);
-      if (job.cancelled && row.status === 'cancelled') return;
-      t.v.results.push(row);
-      job.done = (job.done || 0) + 1;
+    const slot = slots ? slots[slotSeq++] : null;
+    try {
+      while (true) {
+        if (stale()) return;
+        const i = idx++;
+        if (i >= tasks.length) return;
+        const t = tasks[i];
+        const row = slot ? await runOneServe(job, slot, t.v, t.s) : await runOne(job, t.v, t.s);
+        if ((job.gen || 0) !== gen) return;
+        if (job.cancelled && row.status === 'cancelled') return;
+        t.v.results.push(row);
+        appendResultRow(job, t.v.key, t.s, row);
+        job.done = (job.done || 0) + 1;
+      }
+    } finally {
+      if (slot) closeServeWorker(slot);
     }
   }
   await Promise.all(Array.from({ length: workers }, worker));
+  if ((job.gen || 0) !== gen) return;   // 这轮已经被新的续接顶替，别再改状态、别再写库
   job.finishedAt = Date.now();
   if (job.cancelled) {
     job.status = 'cancelled';
     job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
     try { for (const v of job.variants) if (v.results.length) summarizeVariant(v); } catch { }
+    // 终止也要留下能看的数据：部分样本的汇总写成 summary.json（他说的「终止也可出数据」）
+    writeSummary(job);
+    recordToDb(job);
     return;
   }
   job.status = 'done';
-  for (const v of job.variants) summarizeVariant(v);
+  finishSummaries(job);
+  job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
+  writeSummary(job);
+  recordToDb(job);
+}
+
+/* 每个变体算汇总 + 相对基线的差值（done 和 cancelled 两条路都用） */
+function finishSummaries(job) {
+  for (const v of job.variants) if ((v.results || []).length) summarizeVariant(v);
   const base = job.variants[0].summary;
   for (const v of job.variants) {
+    if (!v.summary) continue;
     v.summary.deltaWinratePp = base ? (v.summary.winrate - base.winrate) * 100 : null;
     v.summary.deltaHpLost = (base && v.summary.avgHpLost != null && base.avgHpLost != null) ? v.summary.avgHpLost - base.avgHpLost : null;
     v.summary.relWinrate = base && base.winrate > 0 ? (v.summary.winrate - base.winrate) / base.winrate : null;
   }
-  job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
-  try {
-    fs.writeFileSync(path.join(job.dir, 'summary.json'), JSON.stringify({ job: publicJob(job) }, null, 1), 'utf8');
-  } catch { }
 }
 
 function publicVariant(v) {
@@ -654,6 +931,37 @@ function estimateHtml(d) {
   })).filter(b => b.rows.length);
   if (!blocks.length) blocks.push({ key: 'base', title: '默认卡组', note: '', rows: [] });
   const names = d.cardNames || {};
+  const cardNameOf = id => (names && names[id]) || id;
+  // 战损分布：每局掉多少血（2026-11-28 他要的）
+  const histHtml = (hist, runsTotal) => {
+    if (!Array.isArray(hist) || !hist.length) return '';
+    const total = runsTotal || hist.reduce((s, x) => s + (Number(x.runs) || 0), 0) || 1;
+    const max = Math.max(...hist.map(x => Number(x.runs) || 0), 1);
+    const rows = hist.map(x => {
+      const n = Number(x.runs) || 0;
+      const label = x.from === x.to ? String(x.from) : x.from + '–' + x.to;
+      const w = Math.max(1.5, n / max * 100);
+      return '<div class="drow"><span class="dlab">' + escHtml(label) + ' 血</span><span class="dtrack"><i style="width:' + w.toFixed(1) + '%"></i></span><b class="dnum">' + n + '</b><span class="dpct">' + (n / total * 100).toFixed(0) + '%</span></div>';
+    }).join('');
+    return '<div class="dist"><div class="sect-h">战损分布（每局掉多少血 · 共 ' + total + ' 局）</div>' + rows + '</div>';
+  };
+  // 某一局的出牌情况：按回合列出打出的牌
+  const runHtml = (title, run, cls) => {
+    if (!run) return '';
+    const order = Array.isArray(run.order) ? run.order : [];
+    const turns = order.map((cards, i) => {
+      const list = (cards || []).map(c => '<span class="pc">' + escHtml(cardNameOf(c)) + '</span>').join(' → ');
+      return '<div class="turn"><span class="tno">第 ' + (i + 1) + ' 回合</span><span class="tcards">' + (list || '<span class="muted">（这回合没打牌）</span>') + '</span></div>';
+    }).join('');
+    const hp = run.hpLost == null ? '—' : (Number.isInteger(run.hpLost) ? String(run.hpLost) : Number(run.hpLost).toFixed(1));
+    const tail = (run.turns != null ? ' · ' + run.turns + ' 回合' : '') + ' · ' + (run.won ? '赢' : '输')
+      + (run.deficit != null && !run.won ? ' · 差 ' + run.deficit + ' 血' : '');
+    return '<div class="runblk ' + cls + '">'
+      + '<div class="run-h">' + escHtml(title) + '<span class="muted">种子 ' + (escHtml(run.seed) || '—') + ' · 掉 ' + hp + ' 血' + tail + '</span></div>'
+      + '<div class="run-body">' + (turns || '<div class="muted">这局没记下出牌顺序（老任务没有这项）</div>') + '</div>'
+      + '</div>';
+  };
+
   const baseWr = new Map();
   for (const r of blocks[0].rows) baseWr.set(r.enc || r.name, num(r.winrate) || 0);
 
@@ -709,6 +1017,9 @@ function estimateHtml(d) {
           <span>回合 <b>${r.avgTurns == null ? '—' : escHtml(r.avgTurns)}</b></span>
           <span>${isCard ? '这张牌每局' : '每局打出'} <b>${playsTxt}</b></span>
         </div>
+        ${histHtml(r.hpHist, r.runs)}
+        ${runHtml('最好的一局（掉血最少）', r.best, 'best')}
+        ${runHtml('最差的一局（掉血最多）', r.worst, 'worst')}
         ${attr.length ? attrBlockHtml(attr, '这只怪的伤害归因（打出的伤害各来自哪张牌）', { size: 116, max: 8, names }) : '<div class="muted">这只怪没记下伤害归因</div>'}
       </div></td></tr>`;
       return `<tr class="mrow"><td><span class="caret">▸</span>${escHtml(r.name)}${lost ? ' <span class="lost">打不过</span>' : ''}</td>
@@ -770,6 +1081,22 @@ function estimateHtml(d) {
  .btrack{background:#1b2029;border-radius:5px;height:18px;overflow:hidden}
  .btrack i{display:block;height:100%;border-radius:5px;opacity:.9}
  .bval,.bwr{font-size:12.5px;font-weight:400;font-variant-numeric:tabular-nums;text-align:right}
+ .dist{margin:10px 0 14px}
+ .sect-h{color:#9fb0c6;font-size:12.5px;margin:0 0 6px}
+ .drow{display:grid;grid-template-columns:72px 1fr 56px 48px;align-items:center;gap:8px;padding:2px 0}
+ .dlab{color:#b9c5d6;font-size:12.5px;font-variant-numeric:tabular-nums}
+ .dtrack{background:#1b2029;border-radius:4px;height:14px;overflow:hidden}
+ .dtrack i{display:block;height:100%;background:#4a86d8;border-radius:4px;opacity:.9}
+ .dnum,.dpct{font-size:12px;color:#cfd8e8;text-align:right;font-variant-numeric:tabular-nums}
+ .runblk{border:1px solid #2a3140;border-radius:8px;padding:8px 12px;margin:8px 0;background:#1a1f27}
+ .runblk.best{border-color:#2e6b46}
+ .runblk.worst{border-color:#6b3030}
+ .run-h{font-size:12.5px;color:#cfd8e8;margin-bottom:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+ .run-body{max-height:230px;overflow:auto}
+ .turn{display:grid;grid-template-columns:86px 1fr;gap:8px;padding:1px 0;font-size:12.5px}
+ .tno{color:#8d9bb0}
+ .tcards{color:#dbe4f2}
+ .pc{background:#243043;border-radius:4px;padding:0 5px}
  .attr-card{background:#1d222b;border:1px solid #2a3140;border-radius:10px;padding:12px 16px;margin:0 0 18px;display:inline-block;max-width:100%}
  .attr-title{color:#9fb0c6;font-size:12.5px;margin-bottom:8px}
  .attr-body{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
@@ -830,11 +1157,13 @@ function publicJob(job) {
     seeds: job.seeds, encounter: job.encounter, character: job.character, ascension: job.ascension,
     profile: job.profile, beam: job.beam, nodes: job.nodes, concurrency: job.concurrency,
     potionPolicy: job.potionPolicy, budget: job.budget, relics: job.relics, potions: job.potions,
+    label: job.label || null,
     variants: job.variants.map(publicVariant),
     meta: job.meta || null,
     gameMode: job.gameMode || 'Standard',
     dreadBoss: job.dreadBoss || '',
     lastError: job.lastError || null,
+    resumable: !!(job.done < job.total),
     elapsedSec: job.finishedAt ? Math.round((job.finishedAt - job.startedAt) / 100) / 10
       : (job.startedAt ? Math.round((Date.now() - job.startedAt) / 100) / 10 : 0),
   };
@@ -1079,18 +1408,25 @@ function newJob(body, mode, variants, meta) {
   const job = {
     id, mode, status: 'running', total: 0, done: 0, seeds,
     variants, meta: meta || null,
+    // 结果文件夹（归类路径，比如 骨头初始卡组对战一层弱怪数据测试/删2打）：跑完自动入库时写进 jobs.label
+    label: String(body.label || '').trim().slice(0, 240) || null,
     relics: body.relics || [], relicProps: body.relicProps || {}, potions: body.potions || [], encounter: body.encounter,
     character: body.character || 'NECROBINDER',
     ascension: modeSel.gameMode === 'Dread' ? 10 : (Number(body.ascension) || 0),
     gameMode: modeSel.gameMode, dreadBoss: modeSel.dreadBoss,
     profile: body.profile || 'VeryHigh', beam: Number(body.beam) || 135, nodes: Number(body.nodes) || 100000,
-    concurrency: Math.max(1, Math.min(12, Number(body.concurrency) || 4)),
+    // 并行：用户选的值，但不超过「这台机器的逻辑核数 / 内存预算」，默认按物理核数
+    concurrency: Math.max(1, Math.min(
+      concurrencyBudget(),
+      Number(body.concurrency) || PHYSICAL_CORES,
+    )),
     potionPolicy: body.potionPolicy || 'Disabled', budget: Number(body.budget) || 5000,
     actIndex: Number(body.actIndex) || 0,
     dir: path.join(RUNS, id), lastError: null, startedAt: Date.now(),
     cancelled: false, children: new Set(),
   };
   fs.mkdirSync(job.dir, { recursive: true });
+  saveJobConfig(job);
   jobs.set(id, job);
   runVariants(job).catch(e => { job.status = 'failed'; job.lastError = String(e && e.message || e); });
   return job;
@@ -1101,6 +1437,7 @@ function cancelJob(job) {
   if (!job || job.status !== 'running') return { ok: false, error: '这个任务已经不在跑了' };
   job.cancelled = true;
   job.status = 'cancelled';
+  job.gen = (job.gen || 0) + 1;   // 让这一轮还在跑的 worker 循环退场（见 runVariants 里的 stale()）
   job.finishedAt = Date.now();
   job.elapsedSec = Math.round((job.finishedAt - job.startedAt) / 100) / 10;
   let killed = 0;
@@ -1112,6 +1449,9 @@ function cancelJob(job) {
     for (const c of job.children) { try { c.kill('SIGKILL'); } catch { } }
     job.children.clear();
   }, 1500);
+  // 立刻把「已经算出来的那部分」汇总落盘：终止也能出数据，并且能续接
+  try { for (const v of job.variants) if ((v.results || []).length) summarizeVariant(v); } catch { }
+  writeSummary(job);
   return { ok: true, killed, done: job.done, total: job.total };
 }
 
@@ -1138,12 +1478,80 @@ function loadHistory(limit = 40) {
   return n;
 }
 
-function normDeck(deck) {
-  return (deck || []).map(d => ({
+/* ---------- 启动时把「没跑完的任务」重建出来，等界面来续接 ----------
+   进程被杀/重启时，内存里的 job 没了；runs/<id>/job.json + results.jsonl 还在，就能接着补。 */
+function rebuildUnfinished() {
+  let n = 0;
+  let dirs = [];
+  try { dirs = fs.readdirSync(RUNS, { withFileTypes: true }).filter(d => d.isDirectory()); } catch { return 0; }
+  for (const d of dirs) {
+    const dir = path.join(RUNS, d.name);
+    const cfg = readJson(path.join(dir, 'job.json'));
+    if (!cfg || !cfg.id || jobs.has(cfg.id)) continue;
+    const rows = readResultRows(dir);
+    const total = (cfg.variants || []).length * (cfg.seeds || []).length;
+    if (!total) continue;
+    const done = rows.length;
+    if (done >= total) continue;   // 跑完的不需要续接
+    const variants = (cfg.variants || []).map(v => ({ ...v, results: [], summary: null }));
+    for (const r of rows) {
+      const v = variants.find(x => x.key === r.v);
+      if (v) v.results.push(r.row);
+    }
+    const job = {
+      ...cfg, variants, dir, total, done, status: 'interrupted', cancelled: false, gen: 0,
+      children: new Set(), lastError: '上次没跑完（进程被关掉或服务重启）',
+      startedAt: cfg.createdAt || Date.now(), finishedAt: null, elapsedSec: null,
+    };
+    try { for (const v of variants) if (v.results.length) summarizeVariant(v); } catch { }
+    jobs.set(job.id, job);
+    const num = Number((/^job(\d+)-/.exec(job.id) || [])[1] || 0);
+    if (num > seq) seq = num;
+    n++;
+  }
+  return n;
+}
+
+/* 还没跑完、可以续接的任务（界面上给一个「继续跑」） */
+function unfinishedJobs() {
+  return [...jobs.values()]
+    .filter(j => (j.status === 'cancelled' || j.status === 'interrupted') && j.done < j.total
+      && (!j.dir || fs.existsSync(path.join(j.dir, 'job.json'))))   // 目录没了的（被删了）就别再挂在续接条上
+    .map(j => {
+      const enc = encounterIndex()[j.encounter];
+      return {
+        id: j.id, mode: j.mode, status: j.status, done: j.done, total: j.total,
+        encounter: j.encounter || '', encounterName: (enc && enc.name) || j.encounter || '',
+        character: j.character || '', startedAt: j.startedAt || null,
+        label: (j.meta && (j.meta.label || j.meta.title)) || '',
+      };
+    })
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+}
+
+function normDeck(deck) {  return (deck || []).map(d => ({
     cardId: d.cardId, count: Number(d.count) || 1,
     upgradeLevels: Number(d.upgradeLevels) || 0,
     enchantmentId: d.enchantmentId || null, enchantmentAmount: Number(d.enchantmentAmount) || 0,
   }));
+}
+
+// 遭遇 id 必须真的存在于当前版本的 meta 里。
+// 2026-11-27：本地化里留着改名前的旧名字（密林野生生物 = 密林爬虫的旧名），
+// 前端一旦选中它，harness 建不出这场战斗，整批种子全失败、任务看起来「直接断完」。
+// 所以这里提前拦住，给一句能看懂的话，而不是让它跑一整个必死的任务。
+function requireEncounter(body, res) {
+  if (!body.encounter) {
+    send(res, 400, { error: '必须选一个遭遇' });
+    return false;
+  }
+  if (!encounterIndex()[body.encounter]) {
+    send(res, 400, {
+      error: `「${body.encounter}」在当前版本里没有这个遭遇（多半是旧版本残留的名字）。刷新页面（Ctrl+F5）重新选一个。`,
+    });
+    return false;
+  }
+  return true;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1153,7 +1561,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/solve') {
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
-      if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
+      if (!requireEncounter(body, res)) return;
       const deck = normDeck(body.deck);
       const v = { key: 'base', label: '当前卡组', deck, hp: Number(body.hp) || 0, maxHp: Number(body.maxHp) || 0, results: [], summary: null };
       const job = newJob(body, 'single', [v]);
@@ -1163,7 +1571,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/compare') {
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
-      if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
+      if (!requireEncounter(body, res)) return;
       const cands = (body.candidates || []).filter(c => c && c.cardId);
       if (!cands.length) return send(res, 400, { error: '至少给一张候选卡' });
       if (cands.length > 10) return send(res, 400, { error: '最多十张候选卡' });
@@ -1186,7 +1594,7 @@ const server = http.createServer(async (req, res) => {
       // 自选升级：基线 = 卡组不动；每个方案 = 只把某一条的「已升级张数」+1，其余不变
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
-      if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
+      if (!requireEncounter(body, res)) return;
       const deck = normDeck(body.deck);
       const idxs = [...new Set((body.picks || [])
         .map(p => Number(p && p.index))
@@ -1212,7 +1620,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/rest') {
       const body = await readBody(req);
       if (!body.deck || !body.deck.length) return send(res, 400, { error: '卡组不能为空' });
-      if (!body.encounter) return send(res, 400, { error: '必须选一个遭遇' });
+      if (!requireEncounter(body, res)) return;
       const deck = normDeck(body.deck);
       const hp = Number(body.hp) || 0, maxHp = Number(body.maxHp) || 0;
       const opts = body.rest || {};
@@ -1303,6 +1711,25 @@ const server = http.createServer(async (req, res) => {
         return send(res, 500, { error: msg });
       }
     }
+    if (req.method === 'GET' && u.pathname === '/api/jobs/unfinished') {
+      return send(res, 200, { jobs: unfinishedJobs() });
+    }
+    if (req.method === 'POST' && /^\/api\/job\/[^/]+\/resume$/.test(u.pathname)) {
+      const id = u.pathname.slice('/api/job/'.length, -'/resume'.length);
+      const job = jobs.get(id);
+      if (!job) return send(res, 404, { error: '找不到这个任务（服务重启后没重建出来）' });
+      if (job.status === 'running') return send(res, 409, { error: '这个任务正在跑' });
+      if (!(job.done < job.total)) return send(res, 409, { error: '这个任务已经跑完了' });
+      job.cancelled = false;
+      job.status = 'running';
+      job.gen = (job.gen || 0) + 1;   // 新一代：上一轮的 worker 循环看到代变了就不动了
+      job.finishedAt = null;
+      job.lastError = null;
+      job.startedAt = job.startedAt || Date.now();
+      saveJobConfig(job);
+      runVariants(job).catch(e => { job.status = 'failed'; job.lastError = String(e && e.message || e); });
+      return send(res, 200, { id, status: 'running', done: job.done, total: job.total });
+    }
     if (req.method === 'POST' && /^\/api\/job\/[^/]+\/cancel$/.test(u.pathname)) {
       const id = u.pathname.slice('/api/job/'.length, -'/cancel'.length);
       const job = jobs.get(id);
@@ -1318,6 +1745,17 @@ const server = http.createServer(async (req, res) => {
       // 别再回 404——浏览器会把它记成「资源加载失败」，污染前端报错检查。
       if (!job) return send(res, 200, { id, status: 'gone', total: 0, done: 0, variants: [], message: '任务不存在（服务重启过）' });
       return send(res, 200, publicJob(job));
+    }
+    // 这台机器能开多少并行（前端拿它生成下拉选项，别人机器更好就自动给更多）
+    if (req.method === 'GET' && u.pathname === '/api/caps') {
+      return send(res, 200, {
+        logicalCores: LOGICAL_CORES,
+        physicalCores: PHYSICAL_CORES,
+        maxConcurrency: MAX_CONCURRENCY,
+        memoryBudget: concurrencyBudget(),
+        freeMemGB: Number((os.freemem() / 1073741824).toFixed(1)),
+        totalMemGB: Number((os.totalmem() / 1073741824).toFixed(1)),
+      });
     }
     if (req.method === 'GET' && u.pathname === '/api/diag') {
       try { return send(res, 200, diagnose()); }
@@ -1338,10 +1776,133 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, fs.readFileSync(file), 'text/html; charset=utf-8');
     }
     if (req.method === 'GET' && u.pathname === '/api/ping') {
-      return send(res, 200, { ok: true, app: 'sts2-ui', pid: process.pid, port: PORT, version: 2, diag: true, dread: true });
+      return send(res, 200, { ok: true, app: 'sts2-ui', pid: process.pid, port: PORT, version: 2, diag: true, dread: true, db: !!store });
     }
     if (req.method === 'GET' && u.pathname === '/api/jobs') {
       return send(res, 200, Array.from(jobs.values()).map(j => ({ id: j.id, mode: j.mode, status: j.status, total: j.total, done: j.done })).slice(-20));
+    }
+
+    /* ---------- /api/db/*：结果数据库（导入 / 查询 / 聚合 / 导出） ---------- */
+    if (u.pathname.startsWith('/api/db/')) {
+      if (!store) return send(res, 500, { error: '数据库打不开：' + storeError });
+      const q = Object.fromEntries(u.searchParams.entries());
+      const p = u.pathname;
+
+      if (req.method === 'GET' && p === '/api/db/stats') {
+        return send(res, 200, {
+          ...store.stats(), db: DB_PATH,
+          autoRecord: store.getSetting('autoRecord') !== '0',
+        });
+      }
+      if (req.method === 'GET' && p === '/api/db/jobs') return send(res, 200, store.listJobs(q));
+      // 结果文件夹：给 8766 的「测试前选文件夹」用（和 8770 同一个库、同一套 folders 表）
+      if (req.method === 'GET' && p === '/api/db/folders') return send(res, 200, store.folders());
+      if (req.method === 'POST' && p === '/api/db/folders') {
+        const body = await readBody(req);
+        const path = String(body.path || '').trim().replace(/^\/+|\/+$/g, '');
+        if (!path) return send(res, 400, { error: '缺 path' });
+        store.addFolder(path);
+        return send(res, 200, { ok: true, path, folders: store.folders() });
+      }
+      // 把已有记录挪进某个文件夹（归类）
+      if (req.method === 'POST' && p === '/api/db/label') {
+        const body = await readBody(req);
+        const ids = (Array.isArray(body.ids) ? body.ids : []).filter(Boolean).slice(0, 500);
+        if (!ids.length) return send(res, 400, { error: '缺 ids' });
+        const label = String(body.label || '').trim().slice(0, 240);
+        const n = store.setJobLabel(ids, label);
+        return send(res, 200, { ok: true, moved: n, label });
+      }
+      if (req.method === 'GET' && p === '/api/db/encounters') return send(res, 200, { rows: store.encounters(q) });
+      if (req.method === 'GET' && p === '/api/db/cards') return send(res, 200, store.cards(q));
+      if (req.method === 'GET' && p === '/api/db/trend') return send(res, 200, { rows: store.trend(q) });
+
+      if (req.method === 'GET' && p.startsWith('/api/db/job/')) {
+        const rest = p.slice('/api/db/job/'.length);
+        const id = decodeURIComponent(rest.replace(/\/samples\.csv$/, ''));
+        if (rest.endsWith('/samples.csv')) {
+          const rows = store.db.prepare(`SELECT j.created_at, j.mode, j.encounter_name, j.character, j.ascension,
+              v.key AS variant, v.label, v.card_id, s.seed, s.won, s.hp_lost, s.deficit, s.turns, s.sec,
+              s.plays_total, s.energy_waste, s.potions_used
+            FROM samples s JOIN jobs j ON j.id = s.job_id LEFT JOIN variants v ON v.id = s.variant_id
+            WHERE s.job_id = ? ORDER BY s.id`).all(id);
+          const head = ['created_at', 'mode', 'encounter', 'character', 'ascension', 'variant', 'label', 'card_id',
+            'seed', 'won', 'hp_lost', 'deficit', 'turns', 'sec', 'plays_total', 'energy_waste', 'potions_used'];
+          const lines = [head.join(',')];
+          for (const r of rows) lines.push(head.map(k => {
+            const v = r[k];
+            return v == null ? '' : (/[,"\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : v);
+          }).join(','));
+          const buf = Buffer.from(lines.join('\n'), 'utf8');
+          res.writeHead(200, {
+            'Content-Type': 'text/csv; charset=utf-8', 'Content-Length': buf.length,
+            'Content-Disposition': `attachment; filename="${String(id).replace(/[^\w.-]/g, '_')}-samples.csv"`,
+            'Cache-Control': 'no-store',
+          });
+          return res.end(buf);
+        }
+        const d = store.jobDetail(id, { sampleLimit: Number(q.sampleLimit) || 500 });
+        if (!d) return send(res, 404, { error: '库里没有这次测算：' + id });
+        return send(res, 200, d);
+      }
+
+      if (req.method === 'GET' && p.startsWith('/api/db/card/') && p.endsWith('/encounters')) {
+        const cid = decodeURIComponent(p.slice('/api/db/card/'.length, -'/encounters'.length));
+        const cb = store.cardByEncounter(cid);
+        return send(res, 200, { cardId: cid, rows: cb.rows, totals: cb.totals });
+      }
+
+      if (req.method === 'POST' && p === '/api/db/import') {
+        const body = await readBody(req).catch(() => ({}));
+        const r = store.importRuns(RUNS, { encounters: encounterIndex(), force: !!body.force });
+        return send(res, 200, { ...r, stats: store.stats() });
+      }
+      if (req.method === 'POST' && p === '/api/db/import-csv') {
+        const body = await readBody(req);
+        const text = body.text || (body.file ? fs.readFileSync(body.file, 'utf8') : '');
+        if (!text) return send(res, 400, { error: '没给 CSV 内容' });
+        const enc = body.encounter && encounterIndex()[body.encounter];
+        const r = store.importCsv(text, {
+          label: body.label, file: body.file || null,
+          encounter: body.encounter || null, encounterMeta: enc || null,
+          character: body.character || null, ascension: body.ascension || null,
+        });
+        return send(res, 200, { ...r, stats: store.stats() });
+      }
+      if (req.method === 'POST' && p === '/api/db/record') {
+        const body = await readBody(req);
+        if (!body.job || !body.job.id) return send(res, 400, { error: '缺 job' });
+        const created = store.recordJob(body.job, {
+          source: 'manual', createdAt: body.createdAt || new Date().toISOString(),
+          encounter: encounterIndex()[body.job.encounter] || null,
+        });
+        return send(res, 200, { id: body.job.id, created });
+      }
+      if (req.method === 'POST' && p === '/api/db/setting') {
+        const body = await readBody(req);
+        if (!body.k) return send(res, 400, { error: '缺 k' });
+        store.setSetting(body.k, body.v);
+        return send(res, 200, { ok: true, [body.k]: store.getSetting(body.k) });
+      }
+      if (req.method === 'DELETE' && p.startsWith('/api/db/job/')) {
+        const id = decodeURIComponent(p.slice('/api/db/job/'.length));
+        store.deleteJob(id);
+        // 同时把内存里的任务和 runs/<id> 清掉，不然「没跑完可以续接」还挂着这条已经删掉的测试任务
+        const jj = jobs.get(id);
+        if (jj) jobs.delete(id);
+        try {
+          const dir = (jj && jj.dir) || path.join(RUNS, id);
+          if (dir && fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+        } catch { }
+        return send(res, 200, { ok: true, id, stats: store.stats() });
+      }
+      if (req.method === 'POST' && p === '/api/db/clear') {
+        const body = await readBody(req).catch(() => ({}));
+        if (body.confirm !== 'CLEAR') return send(res, 400, { error: '要清空得带 confirm:"CLEAR"' });
+        store.clearAll();
+        return send(res, 200, { ok: true, stats: store.stats() });
+      }
+      return send(res, 404, { error: 'unknown db route: ' + p });
     }
     if (req.method === 'GET') return serveStatic(req, res, u.pathname);
     return send(res, 405, { error: 'method not allowed' });
@@ -1351,7 +1912,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 const restored = loadHistory();
+const unfinished = rebuildUnfinished();
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`sts2-ui server: http://127.0.0.1:${PORT}（恢复历史结果 ${restored} 条）`);
+  if (unfinished) console.log(`有 ${unfinished} 个没跑完的任务可以续接（界面右上角会提示）`);
+  console.log(`结果库：${store ? DB_PATH : '打不开（' + storeError + '）'}`);
 });

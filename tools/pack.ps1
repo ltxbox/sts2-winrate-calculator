@@ -15,7 +15,9 @@ $ErrorActionPreference = 'Stop'
 $app = 'D:\tts-server\sts2-ui'
 $pkgSrc = Join-Path $app 'pack'
 $harnessSrc = Join-Path $app 'harness'
-$solverDll = 'D:\tts-server\CombatSolver-src\CombatSolver-1.0.3\.godot\mono\temp\bin\Release\CombatSolver.dll'
+$solverDll = 'D:\tts-server\pr278\CombatSolver-d473297e4e7643b5bbdf0a1969aa3c7c9b7bbbfd\.godot\mono\temp\bin\Release\CombatSolver.dll'
+# 2026-11-28：改成带 Rust 内核的 dll（PR#278 合并版）。rust 库按 dll 同级 rust-kernel\ 找，必须一起带。
+$rustKernelDir = 'D:\tts-server\pr278\CombatSolver-d473297e4e7643b5bbdf0a1969aa3c7c9b7bbbfd\.godot\mono\temp\bin\Release\rust-kernel'
 $nodeExe = 'C:\Users\123\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
 $assetsSrc = Join-Path $app 'assets_web'
 $utf8 = New-Object Text.UTF8Encoding($false)
@@ -48,6 +50,8 @@ Copy-Item (Join-Path $app 'public\*') (Join-Path $root 'public') -Recurse
 Copy-Item (Join-Path $app 'lib\*') (Join-Path $root 'lib') -Recurse
 # 2) 数据（含自检用的请求模板）
 Copy-Item (Join-Path $app 'data\*') (Join-Path $root 'data') -Recurse
+# 结果库是使用者自己的数据，绝对不能进分发包
+Get-ChildItem (Join-Path $root 'data') -Filter 'sts2.db*' -ErrorAction SilentlyContinue | Remove-Item -Force
 Copy-Item (Join-Path $pkgSrc 'data\selftest-request.json') (Join-Path $root 'data\selftest-request.json')
 # 3) 卡图（缩过的）
 Copy-Item (Join-Path $assetsSrc '*') (Join-Path $root 'assets') -Recurse
@@ -63,7 +67,7 @@ $dev = [ordered]@{
     'RitsuLibDir'       = 'D:/steam/steamapps/common/Slay the Spire 2/mods/STS2-RitsuLib.0.6.16.variant-pack/compat/0.114.0'
     'RitsuLibCompatDir' = 'D:/steam/steamapps/common/Slay the Spire 2/mods/STS2-RitsuLib.0.6.16.variant-pack/compat/0.114.0'
     'RitsuLibSharedDir' = 'D:/steam/steamapps/common/Slay the Spire 2/mods/STS2-RitsuLib.0.6.16.variant-pack/shared'
-    'CombatSolverDll'   = 'D:/tts-server/CombatSolver-src/CombatSolver-1.0.3/.godot/mono/temp/bin/Release/CombatSolver.dll'
+    'CombatSolverDll'   = 'D:/tts-server/pr278/CombatSolver-d473297e4e7643b5bbdf0a1969aa3c7c9b7bbbfd/.godot/mono/temp/bin/Release/CombatSolver.dll'
 }
 $ph = [ordered]@{
     'Sts2DataDir'       = '__STS2_DATA_DIR__'
@@ -73,14 +77,20 @@ $ph = [ordered]@{
     'CombatSolverDll'   = '__COMBATSOLVER_DLL__'
 }
 foreach ($k in $ph.Keys) {
-    $t = $t.Replace(('"' + $k + '": "' + $dev[$k] + '"'), ('"' + $k + '": "' + $ph[$k] + '"'))
+    # 不比对具体路径（开发机路径会变），直接把 "键": "任意值" 换成占位符
+    $pat = '"' + $k + '":\s*"[^"]*"'
+    $rep = '"' + $k + '": "' + $ph[$k] + '"'
+    $t = [regex]::Replace($t, $pat, $rep)
 }
 if (($ph.Values | Where-Object { $t -notmatch [regex]::Escape($_) }).Count -gt 0) {
     throw 'runtimeconfig 占位符替换失败：检查 harness 里那份 runtimeconfig 是不是又多/少了字段'
 }
 [IO.File]::WriteAllText((Join-Path $root 'harness\OfflineSearchHarness.runtimeconfig.template.json'), $t, $utf8)
-# 5) 求解器（打过补丁的那份）
+# 5) 求解器（打过补丁 + 带 Rust 内核的那份）
 Copy-Item $solverDll (Join-Path $root 'solver\CombatSolver.dll')
+# 5.1) Rust 内核原生库（弱怪走 rust 用；缺了会自动退回 hot，但等于白装）
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'solver\rust-kernel') | Out-Null
+Copy-Item (Join-Path $rustKernelDir 'sts2_combat_rs.dll') (Join-Path $root 'solver\rust-kernel\sts2_combat_rs.dll')
 # 6) 内置 node
 Copy-Item $nodeExe (Join-Path $root 'node\node.exe')
 # 7) 脚本

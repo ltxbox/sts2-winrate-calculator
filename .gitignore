@@ -28,3 +28,13 @@ _config.local.json
 
 node_modules/
 *.zip
+
+# 结果库（使用者自己的测算记录，绝不能入库）
+data/sts2.db
+data/sts2.db-wal
+data/sts2.db-shm
+data/sts2.db.bak-*
+
+# 测试/临时目录
+test/shots/
+.local/
